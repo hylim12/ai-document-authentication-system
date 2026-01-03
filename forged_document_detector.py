@@ -24,95 +24,109 @@ class DocumentForgeryDetector:
 
     def __init__(self, image_path, ocr_engine=None):
         self.image_path = image_path
-        self.ocr_engine = ocr_engine  # Accept a pre-loaded engine to save time
-        self.log = [] 
-        
+        self.ocr_engine = ocr_engine
+        self.log = []
+
         if not os.path.exists(image_path):
             raise FileNotFoundError(f"Image file not found: {image_path}")
 
         try:
-            # Load using PIL
-            pil_image = Image.open(image_path)
-            
-            # --- PERFORMANCE OPTIMIZATION: IMAGE RESIZING ---
-            # Standardizing to 1500px width significantly speeds up OCR
+            # --- LOAD USING PIL ---
+            pil_image = Image.open(image_path).convert("RGB")
+
+            # --- PERFORMANCE OPTIMIZATION: RESIZE ---
             target_width = 1500
-            w_percent = (target_width / float(pil_image.size[0]))
-            target_height = int((float(pil_image.size[1]) * float(w_percent)))
-            
-            # Use LANCZOS for high-quality downsampling to keep text clear
-            pil_image = pil_image.resize((target_width, target_height), Image.Resampling.LANCZOS)
+            w_percent = target_width / float(pil_image.size[0])
+            target_height = int(pil_image.size[1] * w_percent)
+
+            pil_image = pil_image.resize(
+                (target_width, target_height),
+                Image.Resampling.LANCZOS
+            )
+
             image_array = np.array(pil_image)
 
-            if len(image_array.shape) == 2:
-                self.gray = image_array
-                self.original_image = cv2.cvtColor(self.gray, cv2.COLOR_GRAY2BGR)
-            elif image_array.shape[2] >= 3:
-                rgb_array = image_array[:, :, :3]
-                self.original_image = cv2.cvtColor(rgb_array, cv2.COLOR_RGB2BGR)
-                self.gray = cv2.cvtColor(self.original_image, cv2.COLOR_BGR2GRAY)
-            else:
-                raise ValueError(f"Unsupported image format: {image_array.shape}")
-                
-        except Exception as e:
-            # Fallback for corrupted PIL loads
+            # --- CANONICAL IMAGE (BGR, UINT8) ---
+            self.original_image = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
+
+        except Exception:
+            # --- FALLBACK TO OPENCV ---
             self.original_image = cv2.imread(image_path)
             if self.original_image is None:
                 raise ValueError(f"Failed to load image: {image_path}")
-            self.gray = cv2.cvtColor(self.original_image, cv2.COLOR_BGR2GRAY)
 
-        self.height, self.width = self.gray.shape
-        self.log.append(f"- Loaded & Resized: {os.path.basename(image_path)} ({self.width}x{self.height})")
-        
-        # Initialize storage containers
+        # --- HARD GUARANTEE: UINT8 ---
+        if self.original_image.dtype != np.uint8:
+            self.original_image = np.clip(self.original_image, 0, 255).astype(np.uint8)
+
+        # --- ABSOLUTE SOURCE OF TRUTH FOR VISUALIZATION ---
+        self.display_image = self.original_image.copy()
+
+        # --- FORENSIC GRAYSCALE (NEVER ENHANCED) ---
+        self.gray_original = cv2.cvtColor(self.original_image, cv2.COLOR_BGR2GRAY)
+
+        # --- WORKING GRAYSCALE (SAFE TO MODIFY) ---
+        self.gray = self.gray_original.copy()
+
+        self.height, self.width = self.gray_original.shape
+        self.log.append(
+            f"- Loaded & Resized: {os.path.basename(image_path)} ({self.width}x{self.height})"
+        )
+
+        # --- INITIALIZE STORAGE ---
         self.characters = []
         self.text_lines = []
         self.anomalies = []
         self.background_anomalies = []
-        self.ocr_box_anomalies = [] 
+        self.ocr_box_anomalies = []
         self.baseline_stats = None
         self.background_stats = None
-        self.ocr_results = None 
+        self.ocr_results = None
         self.ocr_full_text = ""
-        self.ocr_boxes = [] 
-        self.ner_entities = {} 
-        self.suspicious_regions = [] 
-        self.final_verdict = "VERDICT NOT RUN" 
-        self.forgery_features = {} 
+        self.ocr_boxes = []
+        self.ner_entities = {}
+        self.suspicious_regions = []
+        self.final_verdict = "VERDICT NOT RUN"
+        self.forgery_features = {}
         self.forgery_issues = []
 
+
     def preprocess_image(self):
-        """Enhances contrast internally for OCR without modifying the visual background."""
-        self.log.append("- Preprocess: generating internal enhanced copies for OCR logic.")
-        
-        # Safe local copy - ensures self.original_image stays as the clean input document
+        """
+        Generates OCR-only enhanced grayscale and binary mask.
+        DOES NOT modify self.gray_original.
+        """
+        self.log.append("- Preprocess: OCR-only enhancement (safe mode).")
+
+        # --- OCR ENHANCEMENT COPY ONLY ---
         temp_img = self.original_image.copy()
-        
-        # Internal enhancement for text clarity
+
         lab = cv2.cvtColor(temp_img, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+
+        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
         l = clahe.apply(l)
+
         lab = cv2.merge((l, a, b))
         enhanced_bgr = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-        
-        # Generate the grayscale version for character analysis
-        gray = cv2.cvtColor(enhanced_bgr, cv2.COLOR_BGR2GRAY) 
-        gray = cv2.fastNlMeansDenoising(gray, None, h=6)
-        kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
-        gray = cv2.filter2D(gray, -1, kernel)
-        
-        # Update ONLY technical layers
-        self.gray = gray
-        
-        # IMPORTANT: We no longer re-assign self.original_image here
-        
-        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        kernel_morph = cv2.getStructuringElement(cv2.MORPH_RECT, (2,2))
-        self.binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel_morph)
-        
-        self.log.append("- Preprocess: complete (clean original preserved).")
+
+        gray_ocr = cv2.cvtColor(enhanced_bgr, cv2.COLOR_BGR2GRAY)
+        gray_ocr = cv2.fastNlMeansDenoising(gray_ocr, None, h=5)
+
+        # --- STORE SEPARATELY ---
+        self.gray_ocr = gray_ocr
+
+        # --- BINARY FOR SEGMENTATION ---
+        _, binary = cv2.threshold(
+            self.gray_ocr, 0, 255,
+            cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+        )
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        self.binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+
         return self.binary
+
     
     def detect_text_regions(self):
         """Detects text line regions using OCR boxes or contour fallback."""
@@ -178,13 +192,16 @@ class DocumentForgeryDetector:
 
     def calculate_character_ink_analysis(self):
         """Calculates character ink intensity and edge gradient magnitude."""
-        sobelx = cv2.Sobel(self.gray, cv2.CV_64F, 1, 0, ksize=5)
-        sobely = cv2.Sobel(self.gray, cv2.CV_64F, 0, 1, ksize=5)
+        gray = self.gray_original
+
+        sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=5)
+        sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=5)
         gradient_magnitude = np.sqrt(sobelx**2 + sobely**2)
+
         
         for char in self.characters:
             x1, y1, x2, y2 = char['bbox']
-            char_roi_gray = self.gray[y1:y2, x1:x2]
+            char_roi_gray = gray[y1:y2, x1:x2]
             char_roi_binary = self.binary[y1:y2, x1:x2]
             ink_pixels = char_roi_gray[char_roi_binary > 0]
             char['mean_ink_intensity'] = np.mean(ink_pixels) if ink_pixels.size > 0 else 255
@@ -206,7 +223,7 @@ class DocumentForgeryDetector:
     def calculate_background_stats(self):
         """Calculates global background intensity mean and standard deviation."""
         background_mask = cv2.bitwise_not(self.binary)
-        background_pixels = self.gray[background_mask > 0]
+        background_pixels = self.gray_original[background_mask > 0]
         filtered_pixels = background_pixels[background_pixels < 250] 
 
         if len(filtered_pixels) < 100:
@@ -229,7 +246,7 @@ class DocumentForgeryDetector:
         self.background_anomalies = []
 
         for line_idx, (y_start, y_end) in enumerate(self.text_lines):
-            line_roi_gray = self.gray[y_start:y_end, :]
+            line_roi_gray = self.gray_original[y_start:y_end, :]
             line_roi_binary = self.binary[y_start:y_end, :]
             line_bg_mask = cv2.bitwise_not(line_roi_binary)
             line_bg_pixels = line_roi_gray[line_bg_mask > 0]
@@ -284,88 +301,73 @@ class DocumentForgeryDetector:
 
     def detect_anomalies(self, sensitivity=2.0):
         """
-        FORENSIC CHECK: Compares ALL NER fields against 5 characteristics:
-        1. Font Size, 2. Ink Density, 3. Style, 4. Color Intensity, 5. Alignment.
+        FORENSIC CHECK: Compares characters against statistical baselines
+        and (if available) NER-standard constraints.
         """
-        if not self.baseline_stats: 
+        if not self.baseline_stats:
             self.calculate_baseline_statistics()
-        
-        # --- THE OFFICIAL GLOBAL STANDARD PROFILE (For ALL NER Fields) ---
-        # size: (min_h, max_h), bold: bool, italic: bool, ink: (min, max), align_tol: px
-        STANDARD_BASELINE = {
-            'SURNAME':         {'size': (14, 20), 'bold': True,  'italic': False, 'ink': (30, 70),  'align': 2},
-            'GIVEN NAME':      {'size': (14, 20), 'bold': False, 'italic': False, 'ink': (40, 80),  'align': 2},
-            'NATIONALITY':     {'size': (12, 16), 'bold': False, 'italic': False, 'ink': (40, 80),  'align': 1},
-            'PLACE OF BIRTH':  {'size': (11, 15), 'bold': False, 'italic': False, 'ink': (40, 80),  'align': 1},
-            'DATE OF BIRTH':   {'size': (12, 16), 'bold': False, 'italic': False, 'ink': (30, 60),  'align': 1},
-            'GENDER':          {'size': (12, 16), 'bold': False, 'italic': False, 'ink': (40, 80),  'align': 1},
-            'DATE OF ISSUE':   {'size': (12, 16), 'bold': False, 'italic': False, 'ink': (30, 60),  'align': 1},
-            'DATE OF EXPIRY':  {'size': (12, 16), 'bold': False, 'italic': False, 'ink': (30, 60),  'align': 1},
-            'ID CARD NO':      {'size': (13, 18), 'bold': True,  'italic': False, 'ink': (20, 50),  'align': 1},
-            'PERSONAL NO':     {'size': (13, 18), 'bold': True,  'italic': False, 'ink': (20, 50),  'align': 1},
-            'AUTHORITY':       {'size': (10, 14), 'bold': False, 'italic': True,  'ink': (50, 90),  'align': 2},
-            'SIGNATURE':       {'size': (15, 40), 'bold': False, 'italic': True,  'ink': (20, 100), 'align': 10}
-        }
 
-        anomalies = []
         stats = self.baseline_stats
-        
-        # Pre-calculate line averages for Alignment check
+        anomalies = []
+
+        # --- Pre-calculate baseline alignment per text line ---
         line_baselines = defaultdict(list)
         for c in self.characters:
             line_baselines[c['line_idx']].append(c['y'] + c['height'])
-        line_avg_y = {idx: np.mean(vals) for idx, vals in line_baselines.items()}
+
+        line_avg_y = {
+            idx: np.mean(vals) for idx, vals in line_baselines.items()
+        }
 
         for char in self.characters:
-            scores = []; types = []
-            
-            # Find associated NER field
-            cx, cy = char['x'] + char['width'] / 2, char['y'] + char['height'] / 2
-            current_field = None
-            for field, bbox in self.ner_entities.items():
-                if bbox[0] <= cx <= bbox[2] and bbox[1] <= cy <= bbox[3]:
-                    current_field = field; break
+            scores = []
+            types = []
 
-            if current_field in STANDARD_BASELINE:
-                std = STANDARD_BASELINE[current_field]
-                
-                # 1. Forensic Char: Font Size (Height)
-                if char['height'] > std['size'][1] * 1.15:
-                    scores.append(3.5); types.append(f'STD_ERR_{current_field}_TOO_LARGE')
-                elif char['height'] < std['size'][0] * 0.85:
-                    scores.append(3.5); types.append(f'STD_ERR_{current_field}_TOO_SMALL')
-
-                # 2. Forensic Char: Boldness (Ink Density)
-                if std['bold'] and char['density'] < stats['density_mean'] * 0.9:
-                    scores.append(2.0); types.append(f'STD_ERR_{current_field}_EXPECTED_BOLD')
-
-                # 3. Forensic Char: Font Style (Italic/Aspect Ratio)
-                if not std['italic'] and char['aspect_ratio'] > stats['aspect_ratio_mean'] * 1.3:
-                    scores.append(2.0); types.append(f'STD_ERR_{current_field}_EXPECTED_REGULAR_FONT')
-
-                # 4. Forensic Char: Ink Consistency (Mean Intensity)
-                if char['mean_ink_intensity'] < std['ink'][0] or char['mean_ink_intensity'] > std['ink'][1]:
-                    scores.append(2.5); types.append(f'STD_ERR_{current_field}_INK_TAMPER_SUSPECT')
-
-                # 5. Forensic Char: Vertical Alignment (Baseline Drift)
-                char_base = char['y'] + char['height']
-                if abs(char_base - line_avg_y.get(char['line_idx'], char_base)) > std['align']:
-                    scores.append(2.0); types.append(f'STD_ERR_{current_field}_FLOATING_TEXT')
-
-            # Global Statistical check for anything else
+            # --- GLOBAL GEOMETRIC ANOMALIES ---
             h_z = abs(char['height'] - stats['height_mean']) / (stats['height_std'] + 1e-6)
             if h_z > sensitivity:
-                scores.append(h_z); types.append('GLOBAL_ANOMALY')
+                scores.append(h_z)
+                types.append('GLOBAL_HEIGHT_OUTLIER')
+
+            w_z = abs(char['width'] - stats['width_mean']) / (stats['width_std'] + 1e-6)
+            if w_z > sensitivity:
+                scores.append(w_z)
+                types.append('GLOBAL_WIDTH_OUTLIER')
+
+            ar_z = abs(char['aspect_ratio'] - stats['aspect_ratio_mean']) / (stats['aspect_ratio_std'] + 1e-6)
+            if ar_z > sensitivity:
+                scores.append(ar_z)
+                types.append('GLOBAL_ASPECT_RATIO_OUTLIER')
+
+            # --- INK / STROKE CONSISTENCY ---
+            ink_z = abs(char.get('mean_ink_intensity', stats['ink_mean']) - stats['ink_mean']) / (stats['ink_std'] + 1e-6)
+            if ink_z > sensitivity:
+                scores.append(ink_z)
+                types.append('INK_INTENSITY_ANOMALY')
+
+            grad_z = abs(char.get('mean_gradient', stats['grad_mean']) - stats['grad_mean']) / (stats['grad_std'] + 1e-6)
+            if grad_z > sensitivity:
+                scores.append(grad_z)
+                types.append('EDGE_GRADIENT_ANOMALY')
+
+            # --- ALIGNMENT DRIFT ---
+            char_base = char['y'] + char['height']
+            if abs(char_base - line_avg_y.get(char['line_idx'], char_base)) > stats['height_std']:
+                scores.append(2.0)
+                types.append('BASELINE_DRIFT')
 
             if scores:
                 anomalies.append({
-                    'char': char, 'scores': scores, 'types': types,
+                    'char': char,
+                    'scores': scores,
+                    'types': types,
                     'max_score': max(scores),
-                    'severity': 'high' if any('STD_ERR' in t for t in types) else 'medium'
+                    'severity': 'high' if max(scores) > sensitivity * 1.5 else 'medium'
                 })
 
         self.anomalies = sorted(anomalies, key=lambda x: x['max_score'], reverse=True)
         return self.anomalies
+
 
     def detect_ocr_box_anomalies(self, sensitivity=2.5):
         """Analyzes PaddleOCR boxes for size and vertical placement inconsistencies."""
@@ -463,89 +465,230 @@ class DocumentForgeryDetector:
 
     def identify_critical_entities_from_ocr(self):
         """
-        Advanced Hybrid NER: Classifies text based on content patterns 
-        and robust spatial anchoring for Albanian ID layouts.
+        FINAL Hardened Production Hybrid NER
+        - Safe bbox handling (int only)
+        - No label collisions
+        - No OCR crashes
+        - Compatible with NumPy slicing
         """
-        if not self.ocr_boxes: 
-            self.log.append("- NER: No OCR boxes available.")
+
+        import re
+
+        # ============================================================
+        # STAGE 0: BBOX SANITIZATION (INT-ONLY, SAFE FOR SLICING)
+        # ============================================================
+        sanitized_boxes = []
+        for box in self.ocr_boxes:
+            bbox = box.get("bbox")
+
+            if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+                continue
+
+            try:
+                x1, y1, x2, y2 = [int(round(v)) for v in bbox]
+            except Exception:
+                continue
+
+            # Reject inverted / zero-area boxes
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            sanitized_boxes.append({
+                "text": box.get("text", "").strip(),
+                "bbox": [x1, y1, x2, y2],
+                "confidence": box.get("confidence", 0.0)
+            })
+
+        self.ocr_boxes = sanitized_boxes
+
+        if not self.ocr_boxes:
+            self.log.append("- NER: No valid OCR boxes after sanitization.")
+            self.ner_entities = {}
             return
-            
-        self.log.append("- Running Pattern-Based NER Classifier...")
+
+        # ============================================================
+        # HELPERS
+        # ============================================================
+        def is_label_text(text):
+            t = text.lower()
+            return any(k in t for k in (
+                'mbiemri', 'surname',
+                'emri', 'given',
+                'shtet', 'nationality',
+                'vend', 'place',
+                'dat', 'date',
+                'nr', 'card',
+                'gjinia', 'sex',
+                'personal',
+                'autoritet', 'authority',
+                'firma', 'signature',
+                '/'
+            ))
+
+        def y_mid(b):
+            return (b[1] + b[3]) // 2
+
+        # ============================================================
+        # INIT
+        # ============================================================
+        self.log.append("- Running FINAL Hardened NER Classifier...")
         critical_entities = {}
         claimed_indices = set()
-        
-        # --- Stage 1: Pattern Recognition (High Confidence IDs & Dates) ---
+
+        # ============================================================
+        # STAGE 1: STRONG REGEX ENTITIES
+        # ============================================================
         patterns = {
-            'PERSONAL NO': r'^[A-Z]\d{8}[A-Z]$',  # Format: J11120296E
-            'ID CARD NO': r'^\d{9}$',             # Exactly 9 digits
-            'DATE': r'\d{2}-\d{2}-\d{4}',         # DD-MM-YYYY
-            'GENDER': r'^[MF]$',                  # Single letter M or F
+            'PERSONAL NO': r'^[A-Z]\d{7,9}[A-Z]$',
+            'ID CARD NO': r'^\d{7,10}$',
+            'DATE': r'\d{2}-\d{2}-\d{4}',
+            'SEX': r'^[MF]$'
         }
-        
+
         for i, box in enumerate(self.ocr_boxes):
-            text = box['text'].strip()
+            text = box["text"].upper()
+
             for entity, pat in patterns.items():
-                if re.search(pat, text) and entity not in critical_entities:
-                    critical_entities[entity] = box['bbox']
+                if entity in critical_entities:
+                    continue
+                if re.fullmatch(pat, text):
+                    critical_entities[entity] = {
+                        "text": text,
+                        "bbox": box["bbox"],
+                        "confidence": box["confidence"]
+                    }
                     claimed_indices.add(i)
 
-        # --- Stage 2: Spatial Anchor Linker (Label to Value) ---
+        # ============================================================
+        # STAGE 2: LABEL ANCHORS
+        # ============================================================
         label_map = {
-            r'mbiemri|surname': 'SURNAME', 
+            r'mbiemri|surname': 'SURNAME',
             r'emri|given': 'GIVEN NAME',
-            r'shtet.sia|nationality': 'NATIONALITY', 
+            r'shtet.sia|nationality': 'NATIONALITY',
             r'vendlindja|place': 'PLACE OF BIRTH',
-            r'dat.lindja|date\s*of\s*birth': 'DATE OF BIRTH', 
-            r'data\s*e\s*l.shimit|date\s*of\s*issue': 'DATE OF ISSUE',
-            r'data\s*e\s*skadimit|date\s*of\s*expiry': 'DATE OF EXPIRY', 
-            r'autoriteti|authority': 'AUTHORITY', 
+            r'dat.*lindja|date.*birth': 'DATE OF BIRTH',
+            r'data.*l.shimit|date.*issue': 'DATE OF ISSUE',
+            r'data.*skadimit|date.*expiry': 'DATE OF EXPIRY',
+            r'gjinia|sex': 'SEX',
+            r'nr.*let.rnjoftim|card.*no': 'ID CARD NO',
+            r'nr.*personal|personal.*no': 'PERSONAL NO',
+            r'autoriteti|authority': 'AUTHORITY',
             r'firma|signature': 'SIGNATURE'
         }
 
-        for i, anchor in enumerate(self.ocr_boxes):
-            if i in claimed_indices: continue
-            text = anchor['text'].strip().lower()
-            entity_label = next((name for pat, name in label_map.items() if re.search(pat, text)), None)
-            
-            if entity_label and entity_label not in critical_entities:
-                a_bbox = anchor['bbox']
-                a_y_mid = (a_bbox[1] + a_bbox[3]) / 2
-                a_x_end = a_bbox[2]
+        anchors = []
+        for i, box in enumerate(self.ocr_boxes):
+            for pat, label in label_map.items():
+                if re.search(pat, box["text"].lower()):
+                    anchors.append((i, label))
+                    break
 
-                best_val_idx, min_score = -1, float('inf')
-                for j, val_box in enumerate(self.ocr_boxes):
-                    if i == j or j in claimed_indices: continue
-                    v_bbox = val_box['bbox']
-                    v_y_mid = (v_bbox[1] + v_bbox[3]) / 2
-                    v_x_start = v_bbox[0]
-                    
-                    y_diff = abs(v_y_mid - a_y_mid)
-                    x_dist = v_x_start - a_x_end
+        # ============================================================
+        # STAGE 3: COLUMN-AWARE LINKING
+        # ============================================================
+        for anchor_idx, entity_label in anchors:
+            if entity_label in critical_entities:
+                continue
 
-                    # STRICTOR GEOMETRY: 
-                    # x_dist < 250 prevents jumping to IDs on the far right
-                    # y_diff < 10 ensures text is on the exact same row
-                    if 0 < x_dist < 250 and y_diff < 10: 
-                        score = (60 * y_diff) + x_dist 
-                        if score < min_score:
-                            if not any(re.search(p, val_box['text'].lower()) for p in label_map.keys()):
-                                min_score, best_val_idx = score, j
+            anchor = self.ocr_boxes[anchor_idx]
+            ay = y_mid(anchor["bbox"])
+            ax = anchor["bbox"][2]
 
-                if best_val_idx != -1:
-                    critical_entities[entity_label] = self.ocr_boxes[best_val_idx]['bbox']
-                    claimed_indices.add(best_val_idx)
+            best_idx = -1
+            best_score = float("inf")
 
-        # --- Stage 3: Logical Fallback (Upper-Case Names) ---
-        if 'SURNAME' not in critical_entities:
+            for j, box in enumerate(self.ocr_boxes):
+                if j == anchor_idx or j in claimed_indices:
+                    continue
+                if is_label_text(box["text"]):
+                    continue
+
+                vy = y_mid(box["bbox"])
+                dx = box["bbox"][0] - ax
+
+                if abs(vy - ay) > 14 or not (0 < dx < 300):
+                    continue
+
+                score = abs(vy - ay) * 80 + dx
+                if score < best_score:
+                    best_score = score
+                    best_idx = j
+
+            if best_idx == -1:
+                continue
+
+            val_box = self.ocr_boxes[best_idx]
+            val_text = val_box["text"].strip().upper()
+
+            # ----------------------------
+            # HARD VALIDATION
+            # ----------------------------
+            if entity_label.startswith("DATE") and not re.fullmatch(r'\d{2}-\d{2}-\d{4}', val_text):
+                continue
+            if entity_label == "SEX" and val_text not in ("M", "F"):
+                continue
+            if entity_label == "PERSONAL NO" and not re.fullmatch(r'[A-Z]\d{7,9}[A-Z]', val_text):
+                continue
+
+            critical_entities[entity_label] = {
+                "text": val_text,
+                "bbox": val_box["bbox"],
+                "confidence": val_box["confidence"]
+            }
+            claimed_indices.add(best_idx)
+
+        # ============================================================
+        # STAGE 4: SURNAME FALLBACK
+        # ============================================================
+        if "SURNAME" not in critical_entities:
             for i, box in enumerate(self.ocr_boxes):
-                if i not in claimed_indices and box['text'].isupper() and len(box['text']) > 3:
-                    # Typically Surname is in the top-center area
-                    if self.height * 0.1 < box['bbox'][1] < self.height * 0.4:
-                        critical_entities['SURNAME'] = box['bbox']
-                        claimed_indices.add(i)
+                if i in claimed_indices:
+                    continue
+                if box["text"].isupper():
+                    y = box["bbox"][1]
+                    if self.height * 0.08 < y < self.height * 0.35:
+                        critical_entities["SURNAME"] = {
+                            "text": box["text"],
+                            "bbox": box["bbox"],
+                            "confidence": box["confidence"]
+                        }
                         break
 
-        self.ner_entities = critical_entities
+        # ============================================================
+        # FINAL
+        # ============================================================
+        safe_entities = {}
+
+        for field, data in critical_entities.items():
+            bbox = data.get("bbox")
+
+            if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+                continue
+
+            try:
+                x1, y1, x2, y2 = map(int, bbox)
+            except Exception:
+                continue
+
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            safe_entities[field] = {
+                "text": data["text"],
+                "bbox": (x1, y1, x2, y2),
+                "confidence": data.get("confidence", 0.0)
+            }
+
+        self.ner_entities = safe_entities
+
+        # --- DEBUG OUTPUT ---
+        print("\n[NER FIELDS]")
+        if not self.ner_entities:
+            print("  (none detected)")
+        else:
+            for k in sorted(self.ner_entities):
+                print(f"  {k:15s}: {self.ner_entities[k]['text']}")
 
     def perform_ocr(self):
         """PaddleOCR implementation using the shared engine."""
@@ -562,28 +705,34 @@ class DocumentForgeryDetector:
         try:
             # FORCE detection_limit or use_dilation if text is thin
             result = self.ocr_engine.ocr(np.array(self.original_image), cls=True)
-
+            self.ocr_boxes = []
+            
             if not result or not result[0]:
                 print("[DEBUG] PaddleOCR returned NOTHING.")
                 return
-
-            self.ocr_boxes = []
+            
             for line in result[0]:
-                box = line[0]
+                bbox = line[0]
                 text = line[1][0]
                 conf = line[1][1]
-                
-                # Convert to (x1, y1, x2, y2)
-                x_coords = [p[0] for p in box]; y_coords = [p[1] for p in box]
-                x1, y1, x2, y2 = int(min(x_coords)), int(min(y_coords)), int(max(x_coords)), int(max(y_coords))
 
-                print(f"[OCR DETECTED]: {text} (Conf: {conf:.2f})") # CRITICAL DEBUG LINE
-                self.ocr_boxes.append({'bbox': (x1, y1, x2, y2), 'text': text, 'conf': conf})
+                x_coords = [p[0] for p in bbox]
+                y_coords = [p[1] for p in bbox]
+
+                x1, y1 = int(min(x_coords)), int(min(y_coords))
+                x2, y2 = int(max(x_coords)), int(max(y_coords))
+
+                self.ocr_boxes.append({
+                    "text": text.strip(),
+                    "confidence": conf,
+                    "bbox": (x1, y1, x2, y2)
+                })
 
         except Exception as e:
             self.log.append(f"- PaddleOCR Error: {e}")
             self.ocr_full_text = "OCR ERROR"
-            
+        
+    
     def generate_training_features(self):
         """
         Derives a comprehensive feature vector containing all quantifiable metrics 
@@ -653,86 +802,98 @@ class DocumentForgeryDetector:
 
     def process_document(self, char_sensitivity=2.0, bg_sensitivity=3.0, ocr_sensitivity=2.5):
         """Orchestrates the full detection pipeline with mandatory sequence."""
-        # 1. Start with OCR and Image Preprocessing
-        self.perform_ocr()
-        self.preprocess_image() 
-        
-        # 2. Identify Fields and Values
-        self.identify_critical_entities_from_ocr() 
-        
-        # 3. Run physical and OCR box checks
-        self.detect_ocr_box_anomalies(sensitivity=ocr_sensitivity)
-        self.detect_text_regions()
-        self.segment_characters()
-        self.calculate_background_stats()
-        self.detect_background_anomalies(sensitivity=bg_sensitivity)
-        self.calculate_baseline_statistics()
-        
-        # 4. Detect anomalies and cluster
-        self.detect_anomalies(sensitivity=char_sensitivity)
-        self.cluster_anomalous_regions()
-        
-        # 5. Generate final ML features and final report strings
-        self.generate_training_features()
-        self.generate_report() # This pre-calculates the verdict
+        try:
+            # 1. Start with OCR and Image Preprocessing
+            self.perform_ocr()
+            self.preprocess_image() 
+            
+            # 2. Identify Fields and Values
+            self.identify_critical_entities_from_ocr() 
+            
+            # 3. Run physical and OCR box checks
+            self.detect_ocr_box_anomalies(sensitivity=ocr_sensitivity)
+            self.detect_text_regions()
+            self.segment_characters()
+            self.calculate_background_stats()
+            self.detect_background_anomalies(sensitivity=bg_sensitivity)
+            self.calculate_baseline_statistics()
+            
+            # 4. Detect anomalies and cluster
+            self.detect_anomalies(sensitivity=char_sensitivity)
+            self.cluster_anomalous_regions()
+            
+            # 5. Generate final ML features and final report strings
+            self.generate_training_features()
+            self.generate_report() # This pre-calculates the verdict
 
+        except Exception as e:
+            self.log.append(f"[FATAL PIPELINE ERROR] {e}")
+            raise
     def visualize_results(self, save_path=None):
         """
         High-visibility visualization for FYP results.
-        - Yellow (4px): Raw OCR Detections
-        - Green (4px): Correctly Identified NER Fields
-        - Red (6px): Detected Forensic Anomalies
-        - Verdict: Binary (AUTHENTIC/FORGED)
         """
-        # Binary Verdict Logic
-        has_forensic_anomalies = (len(self.anomalies) > 0 or 
-                                  len(self.background_anomalies) > 0 or 
-                                  len(self.ocr_box_anomalies) > 0)
-        
-        status = "FORGED" if has_forensic_anomalies else "AUTHENTIC"
-        
-        # Start visualization from the clean original image (preserved by fix above)
-        vis = self.original_image.copy()
+        critical_count = sum(
+            1 for a in self.anomalies
+            if a.get('severity') == 'high'
+        )
 
-        # 1. Raw OCR Verification (Thick Yellow - 4px)
+        has_forensic_anomalies = (
+            critical_count >= 5 or
+            len(self.background_anomalies) >= 3 or
+            len(self.ocr_box_anomalies) >= 6
+        )
+
+        # --- Start visualization from original ---
+        vis = self.display_image.copy()
+
+        # 1. OCR boxes (Yellow)
         for box in self.ocr_boxes:
-            b = box['bbox']
-            cv2.rectangle(vis, (b[0], b[1]), (b[2], b[3]), (0, 255, 255), 4)
+            x1, y1, x2, y2 = box['bbox']
+            cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 255), 2)
 
-        # 2. NER Fields (Bold Green - 4px)
-        for field, bbox in self.ner_entities.items():
-            cv2.rectangle(vis, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (0, 255, 0), 4)
-            cv2.putText(vis, field, (bbox[0], bbox[1]-15), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        
-        # 3. Anomalies (Ultra Thick Red - 6px)
+        # 2. NER Fields (Green)
+        for field, data in self.ner_entities.items():
+            bbox = data.get("bbox")
+            if not bbox or len(bbox) != 4:
+                continue
+            x1, y1, x2, y2 = bbox
+            cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+        # 3. High severity anomalies (Red)
         for a in self.anomalies:
-            bbox = None
-            field_name = a.get('field')
-            if field_name and field_name in self.ner_entities:
-                bbox = self.ner_entities[field_name]
-            elif 'char' in a:
-                bbox = a['char']['bbox']
-            
-            if bbox:
-                cv2.rectangle(vis, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (0, 0, 255), 6)
+            if a.get("severity") == "high":
+                x1, y1, x2, y2 = a['char']['bbox']
+                cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 0, 255), 3)
 
-        fig, axes = plt.subplots(1, 2, figsize=(20, 10))
-        
-        # Left Side: ALWAYS clean original
-        axes[0].imshow(cv2.cvtColor(self.original_image, cv2.COLOR_BGR2RGB))
-        axes[0].set_title('Original Document', fontsize=14, fontweight='bold')
-        axes[0].axis('off')
+        # --- Display side-by-side ---
+        orig_rgb = cv2.cvtColor(self.display_image, cv2.COLOR_BGR2RGB)
+        vis_rgb  = cv2.cvtColor(vis, cv2.COLOR_BGR2RGB)
 
-        # Right Side: Analyzed Document (Clean background + boxes)
-        axes[1].imshow(cv2.cvtColor(vis, cv2.COLOR_BGR2RGB))
-        axes[1].set_title(f'Forgery Detection Verdict: {status}', 
-                          color='red' if status == "FORGED" else 'blue', 
-                          fontsize=20, fontweight='bold')
-        axes[1].axis('off')
-        
-        if save_path: 
-            fig.savefig(save_path, dpi=200, bbox_inches='tight')
-            plt.close(fig)
+        fig = plt.figure(figsize=(18, 7))
+
+        ax1 = fig.add_subplot(1, 2, 1)
+        ax1.imshow(orig_rgb)
+        ax1.set_title("Original Document", fontsize=14, weight="bold")
+        ax1.axis("off")
+
+        ax2 = fig.add_subplot(1, 2, 2)
+        ax2.imshow(vis_rgb)
+        ax2.set_title(
+            "Forgery Detection Verdict: FORGED" if has_forensic_anomalies else "Forgery Detection Verdict: AUTHENTIC",
+            fontsize=14,
+            color="red" if has_forensic_anomalies else "green",
+            weight="bold"
+        )
+        ax2.axis("off")
+
+        fig.tight_layout()
+
+        if save_path:
+            fig.savefig(save_path, dpi=200, bbox_inches="tight")
+
+        plt.close(fig)
+
         
     def generate_report(self):
         """Generates a single, clean, comprehensive report matching the target format."""
@@ -751,8 +912,9 @@ class DocumentForgeryDetector:
         ner_keys_order = ['SURNAME', 'GIVEN NAME', 'NATIONALITY', 'ID CARD NO', 'PLACE OF BIRTH', 'DATE OF BIRTH', 'GENDER', 'DATE OF ISSUE', 'DATE OF EXPIRY', 'SIGNATURE', 'PERSONAL NO', 'AUTHORITY']
         detected_keys = [k for k in ner_keys_order if k in self.ner_entities]
         for entity in detected_keys:
-            bbox = self.ner_entities[entity]
-            entity_value = next((box['text'].strip() for box in self.ocr_boxes if box['bbox'] == bbox), "Value Unknown")
+            data = self.ner_entities[entity]
+            bbox = data["bbox"]
+            entity_value = data["text"]
             report.append(f" {entity.ljust(17)} : {entity_value}")
         report.append("-" * 80)
         
@@ -831,7 +993,6 @@ def analyze_single_document(document_path, char_sensitivity=2.0, bg_sensitivity=
     print("                Analysis Complete!")
     print("================================================================================")
 
-    plt.show()
     return detector
 
 def generate_datasets(input_dir="input_docs"):
@@ -937,20 +1098,16 @@ def write_csv(data_list, filename):
         writer.writerows(data_list)
 
 def cleanup_results_folder(folder_path="PNG_results"):
-        """Deletes all existing files in the results folder before a new batch run."""
-        if os.path.exists(folder_path):
-            print(f"[INFO] Cleaning up old results in '{folder_path}'...")
-            for filename in os.listdir(folder_path):
-                file_path = os.path.join(folder_path, filename)
-                try:
-                    if os.path.isfile(file_path) or os.path.islink(file_path):
-                        os.unlink(file_path)
-                    elif os.path.isdir(file_path):
-                        shutil.rmtree(file_path)
-                except Exception as e:
-                    print(f'[ERROR] Failed to delete {file_path}. Reason: {e}')
-        else:
-            os.makedirs(folder_path)
+    """Deletes all existing files in the results folder before a new batch run."""
+    if os.path.exists(folder_path):
+        for filename in os.listdir(folder_path):
+            file_path = os.path.join(folder_path, filename)
+            try:
+                if os.path.isfile(file_path): os.unlink(file_path)
+                elif os.path.isdir(file_path): shutil.rmtree(file_path)
+            except Exception as e: print(f'[ERROR] Cleanup failed: {e}')
+    else:
+        os.makedirs(folder_path)
 
 if __name__ == "__main__":
 
