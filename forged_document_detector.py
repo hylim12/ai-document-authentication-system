@@ -11,6 +11,7 @@ import datetime
 import csv
 import glob
 import shutil
+import json
 try:
     from paddleocr import PaddleOCR
 except ImportError:
@@ -84,6 +85,7 @@ class DocumentForgeryDetector:
         self.ocr_results = None
         self.ocr_full_text = ""
         self.ocr_boxes = []
+        self.save_ocr_json(image_path)
         self.ner_entities = {}
         self.suspicious_regions = []
         self.final_verdict = "VERDICT NOT RUN"
@@ -465,230 +467,198 @@ class DocumentForgeryDetector:
 
     def identify_critical_entities_from_ocr(self):
         """
-        FINAL Hardened Production Hybrid NER
-        - Safe bbox handling (int only)
-        - No label collisions
-        - No OCR crashes
-        - Compatible with NumPy slicing
+        - OCR-normalized, space-tolerant
+        - Robust label anchoring
+        - Geometry-safe linking
+        - NER recall metrics
+        - ML-aligned outputs
         """
 
         import re
+        import unicodedata
+
+        def normalize(text):
+            text = text.upper()
+            text = unicodedata.normalize("NFKD", text)
+            text = "".join(c for c in text if not unicodedata.combining(c))
+            text = re.sub(r'[^A-Z0-9 ]', ' ', text)
+            text = re.sub(r'\s+', ' ', text)
+            return text.strip()
+
 
         # ============================================================
         # STAGE 0: BBOX SANITIZATION (INT-ONLY, SAFE FOR SLICING)
         # ============================================================
-        sanitized_boxes = []
+        sanitized = []
         for box in self.ocr_boxes:
             bbox = box.get("bbox")
-
             if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
                 continue
-
             try:
-                x1, y1, x2, y2 = [int(round(v)) for v in bbox]
+                x1, y1, x2, y2 = map(int, map(round, bbox))
             except Exception:
                 continue
-
-            # Reject inverted / zero-area boxes
             if x2 <= x1 or y2 <= y1:
                 continue
 
-            sanitized_boxes.append({
+            sanitized.append({
                 "text": box.get("text", "").strip(),
-                "bbox": [x1, y1, x2, y2],
+                "norm": normalize(box.get("text", "")),
+                "bbox": (x1, y1, x2, y2),
                 "confidence": box.get("confidence", 0.0)
             })
 
-        self.ocr_boxes = sanitized_boxes
-
+        self.ocr_boxes = sanitized
         if not self.ocr_boxes:
-            self.log.append("- NER: No valid OCR boxes after sanitization.")
             self.ner_entities = {}
+            self.ner_metrics = {}
+            self.missing_ner_fields = []
             return
 
-        # ============================================================
-        # HELPERS
-        # ============================================================
-        def is_label_text(text):
-            t = text.lower()
-            return any(k in t for k in (
-                'mbiemri', 'surname',
-                'emri', 'given',
-                'shtet', 'nationality',
-                'vend', 'place',
-                'dat', 'date',
-                'nr', 'card',
-                'gjinia', 'sex',
-                'personal',
-                'autoritet', 'authority',
-                'firma', 'signature',
-                '/'
+        def y_mid(b): return (b[1] + b[3]) // 2
+
+        def is_label_like(text):
+            return any(re.search(p, text) for p in (
+                r'\bMBIEMR\b', r'\bSURNAME\b',
+                r'\bEMR\b', r'\bGIVEN\b',
+                r'\bSHTET\b', r'\bNATION\b',
+                r'\bVEND\b', r'\bPLACE\b',
+                r'\bDAT\b', r'\bDATE\b',
+                r'\bNR\b', r'\bCARD\b',
+                r'\bGJIN\b', r'\bSEX\b',
+                r'\bPERSONAL\b',
+                r'\bAUTOR\b', r'\bAUTHOR\b',
+                r'\bFIRM\b', r'\bSIGN\b'
             ))
 
-        def y_mid(b):
-            return (b[1] + b[3]) // 2
+        # ============================================================
+        # STAGE 1: STRONG PATTERN ENTITIES (NO LABEL REQUIRED)
+        # ============================================================
+        entities = {}
+        used = set()
 
-        # ============================================================
-        # INIT
-        # ============================================================
-        self.log.append("- Running FINAL Hardened NER Classifier...")
-        critical_entities = {}
-        claimed_indices = set()
-
-        # ============================================================
-        # STAGE 1: STRONG REGEX ENTITIES
-        # ============================================================
-        patterns = {
-            'PERSONAL NO': r'^[A-Z]\d{7,9}[A-Z]$',
-            'ID CARD NO': r'^\d{7,10}$',
-            'DATE': r'\d{2}-\d{2}-\d{4}',
-            'SEX': r'^[MF]$'
+        strong_patterns = {
+            "PERSONAL NO": r'[A-Z]\d{7,9}[A-Z]',
+            "ID CARD NO": r'\d{7,10}',
+            "SEX": r'\b[MF]\b',
+            "DATE": r'\d{2}[-./ ]\d{2}[-./ ]\d{4}'
         }
 
         for i, box in enumerate(self.ocr_boxes):
-            text = box["text"].upper()
-
-            for entity, pat in patterns.items():
-                if entity in critical_entities:
+            for label, pat in strong_patterns.items():
+                if label in entities:
                     continue
-                if re.fullmatch(pat, text):
-                    critical_entities[entity] = {
-                        "text": text,
-                        "bbox": box["bbox"],
-                        "confidence": box["confidence"]
-                    }
-                    claimed_indices.add(i)
+                if re.fullmatch(pat, box["norm"]):
+                    entities[label] = box
+                    used.add(i)
 
         # ============================================================
-        # STAGE 2: LABEL ANCHORS
+        # STAGE 2: LABEL ANCHORS (ROOT-BASED, SPACE-TOLERANT)
         # ============================================================
         label_map = {
-            r'mbiemri|surname': 'SURNAME',
-            r'emri|given': 'GIVEN NAME',
-            r'shtet.sia|nationality': 'NATIONALITY',
-            r'vendlindja|place': 'PLACE OF BIRTH',
-            r'dat.*lindja|date.*birth': 'DATE OF BIRTH',
-            r'data.*l.shimit|date.*issue': 'DATE OF ISSUE',
-            r'data.*skadimit|date.*expiry': 'DATE OF EXPIRY',
-            r'gjinia|sex': 'SEX',
-            r'nr.*let.rnjoftim|card.*no': 'ID CARD NO',
-            r'nr.*personal|personal.*no': 'PERSONAL NO',
-            r'autoriteti|authority': 'AUTHORITY',
-            r'firma|signature': 'SIGNATURE'
+            r'MBIEMR|SURNAME': 'SURNAME',
+            r'EMR|GIVEN': 'GIVEN NAME',
+            r'SHTET|NATION': 'NATIONALITY',
+            r'VEND|PLACE': 'PLACE OF BIRTH',
+            r'LINDJ|BIRTH': 'DATE OF BIRTH',
+            r'LSHIM|ISSUE': 'DATE OF ISSUE',
+            r'SKADIM|EXPIR': 'DATE OF EXPIRY',
+            r'GJIN|SEX': 'SEX',
+            r'LET|CARD': 'ID CARD NO',
+            r'PERSONAL': 'PERSONAL NO',
+            r'AUTOR|AUTHOR': 'AUTHORITY',
+            r'FIRM|SIGN': 'SIGNATURE'
         }
 
         anchors = []
         for i, box in enumerate(self.ocr_boxes):
             for pat, label in label_map.items():
-                if re.search(pat, box["text"].lower()):
+                if re.search(pat, box["norm"]):
                     anchors.append((i, label))
                     break
 
         # ============================================================
-        # STAGE 3: COLUMN-AWARE LINKING
+        # STAGE 3: GEOMETRIC VALUE LINKING
         # ============================================================
-        for anchor_idx, entity_label in anchors:
-            if entity_label in critical_entities:
+        for idx, label in anchors:
+            if label in entities:
                 continue
 
-            anchor = self.ocr_boxes[anchor_idx]
-            ay = y_mid(anchor["bbox"])
-            ax = anchor["bbox"][2]
+            anchor = self.ocr_boxes[idx]
+            ay, ax = y_mid(anchor["bbox"]), anchor["bbox"][2]
 
-            best_idx = -1
-            best_score = float("inf")
+            best, best_score = None, float("inf")
 
             for j, box in enumerate(self.ocr_boxes):
-                if j == anchor_idx or j in claimed_indices:
+                if j == idx or j in used:
                     continue
-                if is_label_text(box["text"]):
+                if is_label_like(box["norm"]):
                     continue
 
                 vy = y_mid(box["bbox"])
                 dx = box["bbox"][0] - ax
 
-                if abs(vy - ay) > 14 or not (0 < dx < 300):
+                if abs(vy - ay) > 28 or not (0 < dx < 420):
                     continue
 
                 score = abs(vy - ay) * 80 + dx
                 if score < best_score:
-                    best_score = score
-                    best_idx = j
+                    best_score, best = score, j
 
-            if best_idx == -1:
-                continue
+            if best is not None:
+                entities[label] = self.ocr_boxes[best]
+                used.add(best)
 
-            val_box = self.ocr_boxes[best_idx]
-            val_text = val_box["text"].strip().upper()
-
-            # ----------------------------
-            # HARD VALIDATION
-            # ----------------------------
-            if entity_label.startswith("DATE") and not re.fullmatch(r'\d{2}-\d{2}-\d{4}', val_text):
-                continue
-            if entity_label == "SEX" and val_text not in ("M", "F"):
-                continue
-            if entity_label == "PERSONAL NO" and not re.fullmatch(r'[A-Z]\d{7,9}[A-Z]', val_text):
-                continue
-
-            critical_entities[entity_label] = {
-                "text": val_text,
-                "bbox": val_box["bbox"],
-                "confidence": val_box["confidence"]
+        # ============================================================
+        # FINAL SAFE OUTPUT
+        # ============================================================
+        self.ner_entities = {
+            k: {
+                "text": v["text"],
+                "bbox": v["bbox"],
+                "confidence": v["confidence"]
             }
-            claimed_indices.add(best_idx)
+            for k, v in entities.items()
+        }
 
         # ============================================================
-        # STAGE 4: SURNAME FALLBACK
+        # NER RECALL METRICS (IMPORTANT)
         # ============================================================
-        if "SURNAME" not in critical_entities:
-            for i, box in enumerate(self.ocr_boxes):
-                if i in claimed_indices:
-                    continue
-                if box["text"].isupper():
-                    y = box["bbox"][1]
-                    if self.height * 0.08 < y < self.height * 0.35:
-                        critical_entities["SURNAME"] = {
-                            "text": box["text"],
-                            "bbox": box["bbox"],
-                            "confidence": box["confidence"]
-                        }
-                        break
+        EXPECTED_FIELDS = {
+            'SURNAME',
+            'GIVEN NAME',
+            'DATE OF BIRTH',
+            'DATE OF ISSUE',
+            'DATE OF EXPIRY',
+            'SEX',
+            'ID CARD NO',
+            'PERSONAL NO',
+            'NATIONALITY',
+            'PLACE OF BIRTH'
+        }
+
+        detected = set(self.ner_entities.keys())
+
+        self.ner_metrics = {
+            "detected_fields": sorted(detected),
+            "missing_fields": sorted(EXPECTED_FIELDS - detected),
+            "detected_count": len(detected),
+            "expected_count": len(EXPECTED_FIELDS),
+            "ner_recall": len(detected) / len(EXPECTED_FIELDS)
+        }
+
+        self.missing_ner_fields = self.ner_metrics["missing_fields"]
 
         # ============================================================
-        # FINAL
+        # DEBUG
         # ============================================================
-        safe_entities = {}
-
-        for field, data in critical_entities.items():
-            bbox = data.get("bbox")
-
-            if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
-                continue
-
-            try:
-                x1, y1, x2, y2 = map(int, bbox)
-            except Exception:
-                continue
-
-            if x2 <= x1 or y2 <= y1:
-                continue
-
-            safe_entities[field] = {
-                "text": data["text"],
-                "bbox": (x1, y1, x2, y2),
-                "confidence": data.get("confidence", 0.0)
-            }
-
-        self.ner_entities = safe_entities
-
-        # --- DEBUG OUTPUT ---
         print("\n[NER FIELDS]")
-        if not self.ner_entities:
-            print("  (none detected)")
-        else:
-            for k in sorted(self.ner_entities):
-                print(f"  {k:15s}: {self.ner_entities[k]['text']}")
+        for k in sorted(self.ner_entities):
+            print(f"  {k:18s}: {self.ner_entities[k]['text']}")
+        if self.missing_ner_fields:
+            print("  Missing fields:", ", ".join(self.missing_ner_fields))
+        print(f"  NER Recall: {self.ner_metrics['ner_recall']:.2f}")
+
 
     def perform_ocr(self):
         """PaddleOCR implementation using the shared engine."""
@@ -752,6 +722,10 @@ class DocumentForgeryDetector:
         # --- 3. Feature Vector Assembly ---
         self.forgery_features = {
             'Char_Count': total_chars,
+            'NER_Detected_Count': self.ner_completeness['detected_count']
+                if hasattr(self, 'ner_completeness') else 0,
+            'NER_Completeness_Ratio': self.ner_completeness['completeness_ratio']
+                if hasattr(self, 'ner_completeness') else 0.0,
             'H_Mean': stats.get('height_mean', 0), 'H_STD': stats.get('height_std', 0),
             'W_Mean': stats.get('width_mean', 0), 'W_STD': stats.get('width_std', 0),
             'AR_Mean': stats.get('aspect_ratio_mean', 0), 'AR_STD': stats.get('aspect_ratio_std', 0),
@@ -787,8 +761,8 @@ class DocumentForgeryDetector:
         target = STANDARD_SIZES.get(field_name.upper())
         if not target: return
 
-        # Define tolerance margin (e.g., 15% allowance)
-        upper_limit, lower_limit = target * 1.15, target * 0.85
+        # Define tolerance margin
+        upper_limit, lower_limit = target * 1.05, target * 0.95
 
         if detected_h > upper_limit or detected_h < lower_limit:
             err_type = 'TOO_LARGE' if detected_h > upper_limit else 'TOO_SMALL_THIN'
@@ -798,7 +772,8 @@ class DocumentForgeryDetector:
                 'description': f"Font size ({detected_h:.1f}) deviates from standard ({target})."
             })
             # Force the feature vector to reflect a geometric anomaly for the ML model
-            self.forgery_features['Geo_Anomaly_Ratio'] = max(self.forgery_features.get('Geo_Anomaly_Ratio', 0), 0.90)
+            self.forgery_features['Geo_Anomaly_Ratio'] = 0.95 
+            self.anomalies.append({'types': ['STD_ERR_CRITICAL']})
 
     def process_document(self, char_sensitivity=2.0, bg_sensitivity=3.0, ocr_sensitivity=2.5):
         """Orchestrates the full detection pipeline with mandatory sequence."""
@@ -957,6 +932,39 @@ class DocumentForgeryDetector:
         final_report = "\n".join(report)
         return final_report
 
+    def save_ocr_json(self, image_path):
+        """
+        Save full PaddleOCR output as JSON (one per document)
+        """
+
+        # Folder creation
+        json_dir = os.path.join("results", "OCR_JSON_results")
+        os.makedirs(json_dir, exist_ok=True)
+
+        image_name = os.path.basename(image_path)
+        json_name = os.path.splitext(image_name)[0] + ".json"
+        json_path = os.path.join(json_dir, json_name)
+
+        data = {
+            "image_name": image_name,
+            "image_size": [self.width, self.height],
+            "ocr_engine": "PaddleOCR",
+            "ocr_results": []
+        }
+
+        for box in self.ocr_boxes:
+            data["ocr_results"].append({
+                "text": box.get("text", ""),
+                "bbox": list(box.get("bbox", [])),
+                "confidence": float(box.get("confidence", 0.0))
+            })
+
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+
+        print(f"[INFO] OCR JSON saved → {json_path}")
+
+
 def ensure_output_folder():
     """Creates the output folder if it doesn't exist."""
     folder = "PNG_results"
@@ -1033,10 +1041,13 @@ def generate_datasets(input_dir="input_docs"):
         doc_root = os.path.splitext(doc_name)[0] 
         is_forged = 'fake' in doc_name.lower()
         label = 1 if is_forged else 0
+
         
         # Update ground truth counters
-        if is_forged: summary['actual_forged'] += 1
-        else: summary['actual_genuine'] += 1
+        if is_forged:
+            print(f"[SKIP] Forged document excluded from training: {doc_name}")
+            continue
+        summary['actual_genuine'] += 1
 
         print(f"[{i+1}/{len(image_paths)}] Analyzing: {doc_name}")
         
@@ -1086,6 +1097,7 @@ def generate_datasets(input_dir="input_docs"):
     print(f" Files Saved to             : {out_folder}/")
     print(f" CSVs Generated             : ml_training_data.csv, ml_test_data.csv")
     print("="*50 + "\n")
+
 
 def write_csv(data_list, filename):
     """Helper to write dictionary lists to CSV with consistent headers."""

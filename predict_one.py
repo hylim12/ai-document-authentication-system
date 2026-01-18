@@ -86,17 +86,25 @@ def make_single_prediction(image_path, model, importances, baseline_means, heade
     # 2. Check for Forensic Standard Violations (Size/Thickness)
     has_std_error = any("STD_ERR" in str(a) for a in detector.anomalies)
 
-    # 3. Model Prediction
+    # 3. Check for forensic anomalies (Laplacian/Geometric)
     prediction = model.predict(X_predict)[0]
     probabilities = model.predict_proba(X_predict)[0]
     
-    # 4. OVERRIDE: Physical standard failure dictates a FORGED verdict
+    forensic_weight = 0.0
+
     if has_std_error:
-        prediction = 1 
-        probabilities[1] = max(probabilities[1], 0.98) 
-        detector.final_verdict = "FORGED"
-    else:
-        detector.final_verdict = "FORGED" if prediction == 1 else "AUTHENTIC"
+        forensic_weight += 0.25
+
+    geo_ratio = features.get('Geo_Anomaly_Ratio', 0)
+    if geo_ratio > 0.6:
+        forensic_weight += 0.15
+
+    # 4. Apply weight safely
+    probabilities[1] = min(1.0, probabilities[1] + forensic_weight)
+    probabilities[0] = 1.0 - probabilities[1]
+
+    prediction = int(probabilities[1] > 0.6)
+    detector.final_verdict = "FORGED" if prediction == 1 else "AUTHENTIC"
 
     # 5. Save report with string path and corrected filenames
     ensure_output_folder()
