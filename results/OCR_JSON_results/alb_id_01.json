@@ -1,0 +1,9 @@
+{
+    "image_name": "alb_id_01.jpg",
+    "image_size": [
+        1500,
+        941
+    ],
+    "ocr_engine": "PaddleOCR",
+    "ocr_results": []
+}
