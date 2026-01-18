@@ -819,11 +819,18 @@ class DocumentForgeryDetector:
             if a.get('severity') == 'high'
         )
 
-        has_forensic_anomalies = (
-            critical_count >= 5 or
-            len(self.background_anomalies) >= 3 or
-            len(self.ocr_box_anomalies) >= 6
-        )
+        use_ml = hasattr(self, "ml_verdict")
+
+        if use_ml:
+            is_forged = self.ml_verdict == "FORGED"
+        else:
+            # fallback (only used during dataset generation)
+            is_forged = (
+                critical_count >= 5 or
+                len(self.background_anomalies) >= 3 or
+                len(self.ocr_box_anomalies) >= 6
+            )
+
 
         # --- Start visualization from original ---
         vis = self.display_image.copy()
@@ -842,10 +849,11 @@ class DocumentForgeryDetector:
             cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
         # 3. High severity anomalies (Red)
-        for a in self.anomalies:
-            if a.get("severity") == "high":
-                x1, y1, x2, y2 = a['char']['bbox']
-                cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 0, 255), 3)
+        if is_forged:
+            for a in self.anomalies:
+                if a.get("severity") == "high":
+                    x1, y1, x2, y2 = a['char']['bbox']
+                    cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 0, 255), 3)
 
         # --- Display side-by-side ---
         orig_rgb = cv2.cvtColor(self.display_image, cv2.COLOR_BGR2RGB)
@@ -861,9 +869,9 @@ class DocumentForgeryDetector:
         ax2 = fig.add_subplot(1, 2, 2)
         ax2.imshow(vis_rgb)
         ax2.set_title(
-            "Forgery Detection Verdict: FORGED" if has_forensic_anomalies else "Forgery Detection Verdict: AUTHENTIC",
+            f"Forgery Detection Verdict: {'FORGED' if is_forged else 'AUTHENTIC'}",
             fontsize=14,
-            color="red" if has_forensic_anomalies else "green",
+            color="red" if is_forged else "green",
             weight="bold"
         )
         ax2.axis("off")
