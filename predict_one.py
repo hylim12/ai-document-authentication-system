@@ -13,7 +13,7 @@ warnings.filterwarnings("ignore")
 # ============================================================
 
 # Image to be predicted (from more_docs, NOT input_docs)
-NEW_IMAGE_PATH = "more_docs/alb_id_37.jpg"
+NEW_IMAGE_PATH = "more_docs/alb_id_94_fake_6_50.jpg"
 
 # Paths produced by ml_model_training.ipynb
 MODEL_PATH = "trained_models/forged_document_rf_model.pkl"
