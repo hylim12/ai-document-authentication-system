@@ -813,26 +813,31 @@ class DocumentForgeryDetector:
     def visualize_results(self, save_path=None):
         """
         High-visibility visualization for FYP results.
+        Visualization logic is synchronized with:
+        - ML verdict during inference
+        - Ground truth during training dataset generation
         """
-        critical_count = sum(
-            1 for a in self.anomalies
-            if a.get('severity') == 'high'
-        )
 
-        use_ml = hasattr(self, "ml_verdict")
+        # Case 1: ML-based inference (predict_one.py)
+        if hasattr(self, "ml_verdict"):
+            verdict = self.ml_verdict
+            show_anomalies = verdict == "FORGED"
 
-        if use_ml:
-            is_forged = self.ml_verdict == "FORGED"
+        # Case 2: Training dataset visualization
+        elif hasattr(self, "is_training_doc"):
+            verdict = "FORGED" if self.is_forged_gt else "AUTHENTIC"
+            show_anomalies = self.is_forged_gt
+
+        # Case 3: Fallback (should rarely be used)
         else:
-            # fallback (only used during dataset generation)
-            is_forged = (
-                critical_count >= 5 or
-                len(self.background_anomalies) >= 3 or
-                len(self.ocr_box_anomalies) >= 6
-            )
+            verdict = "AUTHENTIC"
+            show_anomalies = False
 
+        is_forged = verdict == "FORGED"
 
-        # --- Start visualization from original ---
+        # ------------------------------------------------------------
+        # Start visualization from original
+        # ------------------------------------------------------------
         vis = self.display_image.copy()
 
         # 1. OCR boxes (Yellow)
@@ -848,14 +853,16 @@ class DocumentForgeryDetector:
             x1, y1, x2, y2 = bbox
             cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-        # 3. High severity anomalies (Red)
-        if is_forged:
+        # 3. High-severity anomalies (Red) — ONLY WHEN FORGED
+        if show_anomalies:
             for a in self.anomalies:
-                if a.get("severity") == "high":
+                if a.get("severity") == "high" and "char" in a:
                     x1, y1, x2, y2 = a['char']['bbox']
                     cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 0, 255), 3)
 
-        # --- Display side-by-side ---
+        # ------------------------------------------------------------
+        # Display side-by-side
+        # ------------------------------------------------------------
         orig_rgb = cv2.cvtColor(self.display_image, cv2.COLOR_BGR2RGB)
         vis_rgb  = cv2.cvtColor(vis, cv2.COLOR_BGR2RGB)
 
@@ -869,7 +876,7 @@ class DocumentForgeryDetector:
         ax2 = fig.add_subplot(1, 2, 2)
         ax2.imshow(vis_rgb)
         ax2.set_title(
-            f"Forgery Detection Verdict: {'FORGED' if is_forged else 'AUTHENTIC'}",
+            f"Forgery Detection Verdict: {verdict}",
             fontsize=14,
             color="red" if is_forged else "green",
             weight="bold"
@@ -882,7 +889,6 @@ class DocumentForgeryDetector:
             fig.savefig(save_path, dpi=200, bbox_inches="tight")
 
         plt.close(fig)
-
         
     def generate_report(self):
         """Generates a single, clean, comprehensive report matching the target format."""
@@ -1067,6 +1073,8 @@ def generate_datasets(input_dir="input_docs"):
         
         try:
             detector = DocumentForgeryDetector(path, ocr_engine=shared_engine)
+            detector.is_training_doc = True
+            detector.is_forged_gt = is_forged
             detector.process_document()
             
             # Save visual result
