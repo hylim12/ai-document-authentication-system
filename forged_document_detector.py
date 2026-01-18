@@ -12,6 +12,8 @@ import csv
 import glob
 import shutil
 import json
+import unicodedata
+
 try:
     from paddleocr import PaddleOCR
 except ImportError:
@@ -85,7 +87,6 @@ class DocumentForgeryDetector:
         self.ocr_results = None
         self.ocr_full_text = ""
         self.ocr_boxes = []
-        self.save_ocr_json(image_path)
         self.ner_entities = {}
         self.suspicious_regions = []
         self.final_verdict = "VERDICT NOT RUN"
@@ -474,9 +475,6 @@ class DocumentForgeryDetector:
         - ML-aligned outputs
         """
 
-        import re
-        import unicodedata
-
         def normalize(text):
             text = text.upper()
             text = unicodedata.normalize("NFKD", text)
@@ -489,7 +487,7 @@ class DocumentForgeryDetector:
         # ============================================================
         # STAGE 0: BBOX SANITIZATION (INT-ONLY, SAFE FOR SLICING)
         # ============================================================
-        sanitized = []
+        boxes = []
         for box in self.ocr_boxes:
             bbox = box.get("bbox")
             if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
@@ -501,15 +499,15 @@ class DocumentForgeryDetector:
             if x2 <= x1 or y2 <= y1:
                 continue
 
-            sanitized.append({
+            boxes.append({
                 "text": box.get("text", "").strip(),
                 "norm": normalize(box.get("text", "")),
                 "bbox": (x1, y1, x2, y2),
                 "confidence": box.get("confidence", 0.0)
             })
 
-        self.ocr_boxes = sanitized
-        if not self.ocr_boxes:
+        self.ocr_boxes = boxes
+        if not boxes:
             self.ner_entities = {}
             self.ner_metrics = {}
             self.missing_ner_fields = []
@@ -519,20 +517,20 @@ class DocumentForgeryDetector:
 
         def is_label_like(text):
             return any(re.search(p, text) for p in (
-                r'\bMBIEMR\b', r'\bSURNAME\b',
-                r'\bEMR\b', r'\bGIVEN\b',
-                r'\bSHTET\b', r'\bNATION\b',
-                r'\bVEND\b', r'\bPLACE\b',
-                r'\bDAT\b', r'\bDATE\b',
-                r'\bNR\b', r'\bCARD\b',
-                r'\bGJIN\b', r'\bSEX\b',
-                r'\bPERSONAL\b',
-                r'\bAUTOR\b', r'\bAUTHOR\b',
-                r'\bFIRM\b', r'\bSIGN\b'
+                r'MBIEMR', r'SURNAME',
+                r'EMR', r'GIVEN',
+                r'SHTET', r'NATION',
+                r'VEND', r'PLACE',
+                r'DAT', r'DATE',
+                r'NR', r'CARD',
+                r'GJIN', r'SEX',
+                r'PERSONAL',
+                r'AUTOR', r'AUTHOR',
+                r'FIRM', r'SIGN'
             ))
 
         # ============================================================
-        # STAGE 1: STRONG PATTERN ENTITIES (NO LABEL REQUIRED)
+        # STAGE 1: SAFE REGEX ENTITIES 
         # ============================================================
         entities = {}
         used = set()
@@ -540,11 +538,10 @@ class DocumentForgeryDetector:
         strong_patterns = {
             "PERSONAL NO": r'[A-Z]\d{7,9}[A-Z]',
             "ID CARD NO": r'\d{7,10}',
-            "SEX": r'\b[MF]\b',
-            "DATE": r'\d{2}[-./ ]\d{2}[-./ ]\d{4}'
+            "SEX": r'\b[MF]\b'
         }
 
-        for i, box in enumerate(self.ocr_boxes):
+        for i, box in enumerate(boxes):
             for label, pat in strong_patterns.items():
                 if label in entities:
                     continue
@@ -571,7 +568,7 @@ class DocumentForgeryDetector:
         }
 
         anchors = []
-        for i, box in enumerate(self.ocr_boxes):
+        for i, box in enumerate(boxes):
             for pat, label in label_map.items():
                 if re.search(pat, box["norm"]):
                     anchors.append((i, label))
@@ -584,12 +581,13 @@ class DocumentForgeryDetector:
             if label in entities:
                 continue
 
-            anchor = self.ocr_boxes[idx]
+            anchor = boxes[idx]
             ay, ax = y_mid(anchor["bbox"]), anchor["bbox"][2]
 
-            best, best_score = None, float("inf")
+            best_idx = None
+            best_score = float("inf")
 
-            for j, box in enumerate(self.ocr_boxes):
+            for j, box in enumerate(boxes):
                 if j == idx or j in used:
                     continue
                 if is_label_like(box["norm"]):
@@ -597,17 +595,23 @@ class DocumentForgeryDetector:
 
                 vy = y_mid(box["bbox"])
                 dx = box["bbox"][0] - ax
+                dy = box["bbox"][1] - anchor["bbox"][3]
 
-                if abs(vy - ay) > 28 or not (0 < dx < 420):
+                if not (
+                    (0 < dx < 450 and abs(vy - ay) <= 45) or
+                    (0 <= dy <= 80)
+                ):
                     continue
+
 
                 score = abs(vy - ay) * 80 + dx
                 if score < best_score:
-                    best_score, best = score, j
+                    best_score = score
+                    best_idx = j
 
-            if best is not None:
-                entities[label] = self.ocr_boxes[best]
-                used.add(best)
+            if best_idx is not None:
+                entities[label] = boxes[best_idx]
+                used.add(best_idx)
 
         # ============================================================
         # FINAL SAFE OUTPUT
@@ -634,7 +638,8 @@ class DocumentForgeryDetector:
             'ID CARD NO',
             'PERSONAL NO',
             'NATIONALITY',
-            'PLACE OF BIRTH'
+            'PLACE OF BIRTH',
+            'AUTHORITY'
         }
 
         detected = set(self.ner_entities.keys())
@@ -780,6 +785,7 @@ class DocumentForgeryDetector:
         try:
             # 1. Start with OCR and Image Preprocessing
             self.perform_ocr()
+            self.save_ocr_json(self.image_path) 
             self.preprocess_image() 
             
             # 2. Identify Fields and Values
@@ -1042,12 +1048,12 @@ def generate_datasets(input_dir="input_docs"):
         is_forged = 'fake' in doc_name.lower()
         label = 1 if is_forged else 0
 
-        
-        # Update ground truth counters
+       # Still allow forged docs to be processed for ML
         if is_forged:
-            print(f"[SKIP] Forged document excluded from training: {doc_name}")
-            continue
-        summary['actual_genuine'] += 1
+            summary['actual_forged'] += 1
+        else:
+            summary['actual_genuine'] += 1
+
 
         print(f"[{i+1}/{len(image_paths)}] Analyzing: {doc_name}")
         
@@ -1067,9 +1073,8 @@ def generate_datasets(input_dir="input_docs"):
             data_row = {'Document_ID': doc_name, 'Label': label}
             data_row.update(detector.forgery_features)
             
+            training_data.append(data_row)
             test_data.append(data_row)
-            if not is_forged:
-                training_data.append(data_row)
             
             summary['success'] += 1
 

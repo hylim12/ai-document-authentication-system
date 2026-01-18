@@ -1,0 +1,270 @@
+{
+    "image_name": "alb_id_22.jpg",
+    "image_size": [
+        1500,
+        941
+    ],
+    "ocr_engine": "PaddleOCR",
+    "ocr_results": [
+        {
+            "text": "LETERNJOFTIM ID",
+            "bbox": [
+                69,
+                28,
+                336,
+                62
+            ],
+            "confidence": 0.9596798419952393
+        },
+        {
+            "text": "REPOBLKAESHOIPERISE",
+            "bbox": [
+                483,
+                29,
+                986,
+                63
+            ],
+            "confidence": 0.929835855960846
+        },
+        {
+            "text": "NOBCOFALBANIA",
+            "bbox": [
+                1028,
+                31,
+                1467,
+                62
+            ],
+            "confidence": 0.8305028676986694
+        },
+        {
+            "text": "mbiemri/surname",
+            "bbox": [
+                484,
+                138,
+                689,
+                164
+            ],
+            "confidence": 0.9926204681396484
+        },
+        {
+            "text": "Bejta",
+            "bbox": [
+                482,
+                162,
+                613,
+                219
+            ],
+            "confidence": 0.9969238042831421
+        },
+        {
+            "text": "emri/given name",
+            "bbox": [
+                483,
+                220,
+                677,
+                251
+            ],
+            "confidence": 0.9698899388313293
+        },
+        {
+            "text": "Arben",
+            "bbox": [
+                481,
+                249,
+                605,
+                288
+            ],
+            "confidence": 0.9981809854507446
+        },
+        {
+            "text": "shtetesia/nationality",
+            "bbox": [
+                483,
+                302,
+                714,
+                331
+            ],
+            "confidence": 0.9975423216819763
+        },
+        {
+            "text": "nr.leternjoftim/card.no",
+            "bbox": [
+                1005,
+                303,
+                1277,
+                330
+            ],
+            "confidence": 0.9842599034309387
+        },
+        {
+            "text": "Shqiptare/Albanian",
+            "bbox": [
+                484,
+                337,
+                894,
+                382
+            ],
+            "confidence": 0.9864224195480347
+        },
+        {
+            "text": "705536852",
+            "bbox": [
+                1009,
+                339,
+                1245,
+                376
+            ],
+            "confidence": 0.9987907409667969
+        },
+        {
+            "text": "vendlindja/place of birth",
+            "bbox": [
+                483,
+                385,
+                766,
+                413
+            ],
+            "confidence": 0.9760902523994446
+        },
+        {
+            "text": "Koprencke, ALB",
+            "bbox": [
+                487,
+                419,
+                813,
+                460
+            ],
+            "confidence": 0.9571646451950073
+        },
+        {
+            "text": "datelindia/date of birth",
+            "bbox": [
+                481,
+                464,
+                753,
+                497
+            ],
+            "confidence": 0.9687369465827942
+        },
+        {
+            "text": "gjinia/sex",
+            "bbox": [
+                1001,
+                462,
+                1115,
+                502
+            ],
+            "confidence": 0.9967638850212097
+        },
+        {
+            "text": "30-06-1991",
+            "bbox": [
+                487,
+                503,
+                739,
+                540
+            ],
+            "confidence": 0.993860125541687
+        },
+        {
+            "text": "M",
+            "bbox": [
+                1000,
+                498,
+                1055,
+                543
+            ],
+            "confidence": 0.9949116110801697
+        },
+        {
+            "text": "data eAeshimit/date of issue",
+            "bbox": [
+                481,
+                553,
+                809,
+                579
+            ],
+            "confidence": 0.9333133697509766
+        },
+        {
+            "text": "data e skadimit/date of .expiry",
+            "bbox": [
+                1005,
+                551,
+                1352,
+                579
+            ],
+            "confidence": 0.9408448338508606
+        },
+        {
+            "text": "08-11-2015",
+            "bbox": [
+                486,
+                585,
+                738,
+                622
+            ],
+            "confidence": 0.9953055381774902
+        },
+        {
+            "text": "08-11-2025",
+            "bbox": [
+                1005,
+                585,
+                1283,
+                616
+            ],
+            "confidence": 0.9963685870170593
+        },
+        {
+            "text": "firma/signature",
+            "bbox": [
+                187,
+                631,
+                364,
+                667
+            ],
+            "confidence": 0.9903902411460876
+        },
+        {
+            "text": "autoriteti leshues/authority",
+            "bbox": [
+                481,
+                636,
+                802,
+                662
+            ],
+            "confidence": 0.9889746904373169
+        },
+        {
+            "text": "nr.personal/personal no.",
+            "bbox": [
+                1005,
+                636,
+                1291,
+                662
+            ],
+            "confidence": 0.9598342776298523
+        },
+        {
+            "text": "MPB",
+            "bbox": [
+                483,
+                669,
+                578,
+                709
+            ],
+            "confidence": 0.9951620101928711
+        },
+        {
+            "text": "J10630153F",
+            "bbox": [
+                1005,
+                670,
+                1291,
+                703
+            ],
+            "confidence": 0.993816077709198
+        }
+    ]
+}
