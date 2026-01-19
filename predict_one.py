@@ -1,12 +1,15 @@
+"""
+Project Title: AI-POWERED DOCUMENT AUTHENTICATION FOR ANTI-MONEY LAUNDERING (AML) SYSTEMS
+Created By: Eldeena Lim Huey Yinn
+Student ID: 1211111904
+"""
 import os
 import joblib
 import pandas as pd
 import numpy as np
-import warnings
 
 from forged_document_detector import DocumentForgeryDetector, ensure_output_folder
 
-warnings.filterwarnings("ignore")
 
 # ============================================================
 # CONFIGURATION
