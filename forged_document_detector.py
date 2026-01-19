@@ -1,3 +1,10 @@
+"""
+Project Title: AI-POWERED DOCUMENT AUTHENTICATION FOR ANTI-MONEY LAUNDERING (AML) SYSTEMS
+Created By: Eldeena Lim Huey Yinn
+Student ID: 1211111904
+"""
+
+
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
@@ -5,7 +12,6 @@ from collections import defaultdict
 import warnings
 import os
 from PIL import Image
-import pytesseract 
 import re 
 import datetime 
 import csv
@@ -17,7 +23,6 @@ import unicodedata
 try:
     from paddleocr import PaddleOCR
 except ImportError:
-    # Set to None if paddleocr is not installed
     PaddleOCR = None 
 
 warnings.filterwarnings('ignore')
@@ -217,11 +222,6 @@ class DocumentForgeryDetector:
         
         if self.baseline_stats is None: self.baseline_stats = {}
             
-        self.baseline_stats.update({
-            'ink_mean': np.mean(intensities), 'ink_std': np.std(intensities),
-            'grad_mean': np.mean(gradients), 'grad_std': np.std(gradients),
-            'density_mean': np.mean(densities), 'density_std': np.std(densities),
-        })
 
     def calculate_background_stats(self):
         """Calculates global background intensity mean and standard deviation."""
@@ -719,10 +719,16 @@ class DocumentForgeryDetector:
         stats = self.baseline_stats if self.baseline_stats else {}
         total_chars = len(self.characters)
         
-        # --- 2. Anomaly Counts and Ratios ---
-        geo_anomalies = sum(1 for a in self.anomalies if any(t in a['types'] for t in ['height', 'width', 'aspect_ratio']))
-        ink_anomalies = sum(1 for a in self.anomalies if any(t in a['types'] for t in ['ink_gradient', 'ink_gradient_NER_focus']))
-        density_anomalies = sum(1 for a in self.anomalies if 'density' in a['types'])
+        geo_anomalies = sum(
+            1 for a in self.anomalies
+            if any(t.startswith("GLOBAL") for t in a['types'])
+        )
+
+        ink_anomalies = sum(
+            1 for a in self.anomalies
+            if any(t in ('INK_INTENSITY_ANOMALY', 'EDGE_GRADIENT_ANOMALY') for t in a['types'])
+        )
+
 
         # --- 3. Feature Vector Assembly ---
         self.forgery_features = {
@@ -739,7 +745,6 @@ class DocumentForgeryDetector:
             'Ink_Density_Mean': stats.get('density_mean', 0),
             'Geo_Anomaly_Ratio': geo_anomalies / (total_chars + 1e-6),
             'Ink_Anomaly_Ratio': ink_anomalies / (total_chars + 1e-6),
-            'Density_Anomaly_Ratio': density_anomalies / (total_chars + 1e-6),
             'BG_Mean': self.background_stats.get('mean', 0) if self.background_stats else 0,
             'BG_STD': self.background_stats.get('std', 0) if self.background_stats else 0,
             'OCR_Box_Anomalies_Count': len(self.ocr_box_anomalies),
@@ -750,47 +755,18 @@ class DocumentForgeryDetector:
         self.log.append(f"- Feature vector generated with {len(self.forgery_features)} metrics.")
         return self.forgery_features
     
-    def check_standard_baseline_violation(self, field_name, detected_h):
-        """
-        Validates field values against the official standard sizes.
-        Target sizes are based on genuine Albanian ID training profiles.
-        """
-        # --- THE OFFICIAL STANDARD BASES (Derived from genuine docs) ---
-        STANDARD_SIZES = {
-            "GIVEN NAME": 11.0, "SURNAME": 11.0, "ID CARD NO": 11.0, 
-            "PERSONAL NO": 11.0, "NATIONALITY": 9.0, "PLACE OF BIRTH": 9.0,
-            "DATE OF BIRTH": 9.0, "GENDER": 9.0, "DATE OF ISSUE": 9.0,
-            "DATE OF EXPIRY": 9.0, "AUTHORITY": 8.5, "SIGNATURE": 25.0
-        }
-        
-        target = STANDARD_SIZES.get(field_name.upper())
-        if not target: return
-
-        # Define tolerance margin
-        upper_limit, lower_limit = target * 1.05, target * 0.95
-
-        if detected_h > upper_limit or detected_h < lower_limit:
-            err_type = 'TOO_LARGE' if detected_h > upper_limit else 'TOO_SMALL_THIN'
-            self.anomalies.append({
-                'field': field_name,
-                'types': [f'STD_ERR_{field_name.upper()}_{err_type}'],
-                'description': f"Font size ({detected_h:.1f}) deviates from standard ({target})."
-            })
-            # Force the feature vector to reflect a geometric anomaly for the ML model
-            self.forgery_features['Geo_Anomaly_Ratio'] = 0.95 
-            self.anomalies.append({'types': ['STD_ERR_CRITICAL']})
 
     def process_document(self, char_sensitivity=2.0, bg_sensitivity=3.0, ocr_sensitivity=2.5):
         """Orchestrates the full detection pipeline with mandatory sequence."""
         try:
             # 1. Start with OCR and Image Preprocessing
             self.perform_ocr()
-            self.save_ocr_json(self.image_path) 
             self.preprocess_image() 
             
             # 2. Identify Fields and Values
             self.identify_critical_entities_from_ocr() 
-            
+            self.save_ocr_json(self.image_path) 
+
             # 3. Run physical and OCR box checks
             self.detect_ocr_box_anomalies(sensitivity=ocr_sensitivity)
             self.detect_text_regions()

@@ -1,0 +1,52 @@
+Project Title: AI-Powered Document Authentication for AML Systems
+Developer: Eldeena Lim Huey Yinn
+Supervisor: Prof. Ts. Dr. Tee Connie
+Institution: Faculty of Information Science & Technology, Multimedia University.
+
+Project Overview
+This project, developed by Eldeena Lim Huey Yinn for the Multimedia University (MMU) Session 2025/2026 Final Year Project, presents an intelligent, automated solution for document integrity assessment within Anti-Money Laundering (AML) frameworks.Traditional manual verification is prone to human fatigue and often fails to detect high-quality digital manipulations. This system bridges that gap by leveraging Computer Vision (CV) and Supervised Machine Learning to detect subtle visual anomalies in identity documents (passports, ID cards) and financial records (receipts, bank statements).
+
+Core Features
+1. Multi-Level Feature Extraction: Analyzes documents at the character, structural, and background levels.
+2. Semantic Parsing (NER): Uses PaddleOCR and Named Entity Recognition to validate logical consistency (e.g., matching DOB with Passport expiry logic).
+3. Forensic Anomaly Detection: Calculates statistical Z-scores for character geometry (height, width, aspect ratio) and ink intensity to find "outlier" modifications.
+4. Machine Learning Classification: Employs a Random Forest model to provide a definitive "Authentic" or "Forged" verdict based on a fusion of forensic indicators.
+5. Explainable Visualization: Generates reports that highlight suspicious regions in red boxes, providing transparency for compliance analysts.
+
+Technical Stack
+1. Language: Python 3.x
+2. Libraries: OpenCV (Image processing & Binarization)
+3. PaddleOCR (Text detection and recognition)
+4. Scikit-Learn (Random Forest Classifier, data scaling)
+5. Pandas/NumPy (Feature matrix manipulation)
+6. Matplotlib/Seaborn (Visualization and Confusion Matrix analysis)
+
+File Structure & Guide
+1. forged_document_detector.py
+- The Engine. This is the primary processing script.
+- Functionality: Performs image preprocessing (CLAHE, Otsu's Binarization), segments characters, extracts forensic features, and clusters anomalies.
+- Output: Generates a comprehensive "Forensic Authentication Report" and saves localized visualization maps to the PNG_results folder.
+- Key Class: DocumentForgeryDetector
+
+2. ml_model_training.ipynb
+- The Brain. A Jupyter Notebook used for research and model optimization.
+- Functionality: Loads the training feature matrix (ml_training_data.csv), performs a 70/30 train-test split, trains the Random Forest model, and evaluates performance.
+- Results: Contains the Confusion Matrix (achieving ~65.22% accuracy on the MIDV-2020 Albanian subset) and Feature Importance charts.
+
+3. predict_one.py
+- The Deployment Script. A streamlined interface for single-document inference.
+- Functionality: Loads the pre-trained .pkl model and runs the full CV pipeline on a single "unseen" image to provide an instant verdict with a confidence percentage.
+
+How to Run
+- Environment Setup: Ensure Python 3.x is installed along with dependencies:
+pip install opencv-python paddleocr paddlepaddle scikit-learn pandas matplotlib joblib
+
+- Generate Dataset: Run forged_document_detector.py to process images in your input_docs folder and generate ml_training_data.csv.
+
+- Train Model: Run the cells in ml_model_training.ipynb to save the forged_document_rf_model.pkl.
+
+- Single Prediction: 
+ python predict_one.py
+
+This prototype serves as a Proof of Concept (PoC). While current testing on the Albanian Passport subset shows a strong recall rate of 66.67% (effectively catching two-thirds of forgeries), future iterations (FYP 2) will focus on Error Level Analysis (ELA) and Cross-field Semantic Validation (matching Visual Zone to MRZ checksums) to further reduce false negatives in high-stakes financial environments.
+
