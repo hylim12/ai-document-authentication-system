@@ -2,30 +2,29 @@
 Project Title: AI-POWERED DOCUMENT AUTHENTICATION FOR ANTI-MONEY LAUNDERING (AML) SYSTEMS
 Created By: Eldeena Lim Huey Yinn
 Student ID: 1211111904
+
+File: predict_one.py
+Functionality: Combines forensic CV extraction with the trained Random Forest verdict.
+
 """
 import os
 import joblib
 import pandas as pd
 import numpy as np
-
 from forged_document_detector import DocumentForgeryDetector, ensure_output_folder
 
-
 # ============================================================
-# CONFIGURATION
+# CONFIGURATION: MODEL AND SCHEMA PATHS
 # ============================================================
 
-# Image to be predicted (from more_docs, NOT input_docs)
+# Image to be predicted (unseen documents)
 NEW_IMAGE_PATH = "more_docs/alb_id_94_fake_6_50.jpg"
 
 # Paths produced by ml_model_training.ipynb
 MODEL_PATH = "trained_models/forged_document_rf_model.pkl"
 FEATURE_COLUMNS_PATH = "trained_models/feature_columns.pkl"
 
-# ============================================================
-# LOAD TRAINED MODEL & FEATURE SCHEMA
-# ============================================================
-
+# Load model artifacts
 try:
     model = joblib.load(MODEL_PATH)
     feature_columns = joblib.load(FEATURE_COLUMNS_PATH)
@@ -39,11 +38,13 @@ except Exception as e:
 
 def predict_single_document(image_path):
     """
-    Runs full forensic feature extraction + ML prediction
-    on a single document image.
+    Executes end-to-end authentication for a single document.
+    1. Extracts CV features.
+    2. Aligns features with the trained ML schema.
+    3. Returns classification verdict and confidence.
     """
 
-    # 1. Run forensic feature extraction
+    # 1. Initialize forensic detector
     detector = DocumentForgeryDetector(image_path)
     detector.process_document()
 
