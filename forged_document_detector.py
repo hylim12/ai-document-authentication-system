@@ -2,9 +2,12 @@
 Project Title: AI-POWERED DOCUMENT AUTHENTICATION FOR ANTI-MONEY LAUNDERING (AML) SYSTEMS
 Created By: Eldeena Lim Huey Yinn
 Student ID: 1211111904
+
+File: forged_document_detector.py
+Functionality: Image preprocessing, character segmentation, and statistical anomaly detection.
 """
 
-
+# Import necessary libraries and modules
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
@@ -19,30 +22,26 @@ import glob
 import shutil
 import json
 import unicodedata
-
 try:
     from paddleocr import PaddleOCR
 except ImportError:
     PaddleOCR = None 
-
 warnings.filterwarnings('ignore')
 
 
 class DocumentForgeryDetector:
 
     def __init__(self, image_path, ocr_engine=None):
+        """Initializes forensic storage and standardizes input resolution."""
         self.image_path = image_path
         self.ocr_engine = ocr_engine
         self.log = []
 
         if not os.path.exists(image_path):
             raise FileNotFoundError(f"Image file not found: {image_path}")
-
         try:
-            # --- LOAD USING PIL ---
+            # Standardize input for consistent feature extraction
             pil_image = Image.open(image_path).convert("RGB")
-
-            # --- PERFORMANCE OPTIMIZATION: RESIZE ---
             target_width = 1500
             w_percent = target_width / float(pil_image.size[0])
             target_height = int(pil_image.size[1] * w_percent)
@@ -51,37 +50,24 @@ class DocumentForgeryDetector:
                 (target_width, target_height),
                 Image.Resampling.LANCZOS
             )
-
             image_array = np.array(pil_image)
-
-            # --- CANONICAL IMAGE (BGR, UINT8) ---
             self.original_image = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
-
         except Exception:
-            # --- FALLBACK TO OPENCV ---
             self.original_image = cv2.imread(image_path)
             if self.original_image is None:
                 raise ValueError(f"Failed to load image: {image_path}")
 
-        # --- HARD GUARANTEE: UINT8 ---
         if self.original_image.dtype != np.uint8:
             self.original_image = np.clip(self.original_image, 0, 255).astype(np.uint8)
-
-        # --- ABSOLUTE SOURCE OF TRUTH FOR VISUALIZATION ---
         self.display_image = self.original_image.copy()
-
-        # --- FORENSIC GRAYSCALE (NEVER ENHANCED) ---
         self.gray_original = cv2.cvtColor(self.original_image, cv2.COLOR_BGR2GRAY)
-
-        # --- WORKING GRAYSCALE (SAFE TO MODIFY) ---
         self.gray = self.gray_original.copy()
-
         self.height, self.width = self.gray_original.shape
         self.log.append(
             f"- Loaded & Resized: {os.path.basename(image_path)} ({self.width}x{self.height})"
         )
 
-        # --- INITIALIZE STORAGE ---
+        # Internal state initialization
         self.characters = []
         self.text_lines = []
         self.anomalies = []
@@ -101,12 +87,10 @@ class DocumentForgeryDetector:
 
     def preprocess_image(self):
         """
+        Enhances image quality using CLAHE and Otsu's Binarization.
         Generates OCR-only enhanced grayscale and binary mask.
-        DOES NOT modify self.gray_original.
         """
         self.log.append("- Preprocess: OCR-only enhancement (safe mode).")
-
-        # --- OCR ENHANCEMENT COPY ONLY ---
         temp_img = self.original_image.copy()
 
         lab = cv2.cvtColor(temp_img, cv2.COLOR_BGR2LAB)
@@ -120,11 +104,7 @@ class DocumentForgeryDetector:
 
         gray_ocr = cv2.cvtColor(enhanced_bgr, cv2.COLOR_BGR2GRAY)
         gray_ocr = cv2.fastNlMeansDenoising(gray_ocr, None, h=5)
-
-        # --- STORE SEPARATELY ---
         self.gray_ocr = gray_ocr
-
-        # --- BINARY FOR SEGMENTATION ---
         _, binary = cv2.threshold(
             self.gray_ocr, 0, 255,
             cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
@@ -168,7 +148,7 @@ class DocumentForgeryDetector:
         return self.text_lines
 
     def segment_characters(self):
-        """Uses Contour-based segmentation for individual characters."""
+        """Performs contour analysis to isolate individual text elements."""
         contours, _ = cv2.findContours(self.binary.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         characters = []
         min_char_area = self.height * self.width * 0.00001 
@@ -206,7 +186,6 @@ class DocumentForgeryDetector:
         sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=5)
         gradient_magnitude = np.sqrt(sobelx**2 + sobely**2)
 
-        
         for char in self.characters:
             x1, y1, x2, y2 = char['bbox']
             char_roi_gray = gray[y1:y2, x1:x2]
@@ -215,11 +194,10 @@ class DocumentForgeryDetector:
             char['mean_ink_intensity'] = np.mean(ink_pixels) if ink_pixels.size > 0 else 255
             grad_roi = gradient_magnitude[y1:y2, x1:x2]
             char['mean_gradient'] = np.mean(grad_roi[char_roi_binary > 0]) if grad_roi[char_roi_binary > 0].size > 0 else 0
-            
+        
         intensities = [c['mean_ink_intensity'] for c in self.characters]
         gradients = [c['mean_gradient'] for c in self.characters]
         densities = [c['density'] for c in self.characters]
-        
         if self.baseline_stats is None: self.baseline_stats = {}
             
 
@@ -304,8 +282,7 @@ class DocumentForgeryDetector:
 
     def detect_anomalies(self, sensitivity=2.0):
         """
-        FORENSIC CHECK: Compares characters against statistical baselines
-        and (if available) NER-standard constraints.
+        FORENSIC CHECK: Compares characters against statistical baselines and (if available) NER-standard constraints.
         """
         if not self.baseline_stats:
             self.calculate_baseline_statistics()
@@ -313,7 +290,6 @@ class DocumentForgeryDetector:
         stats = self.baseline_stats
         anomalies = []
 
-        # --- Pre-calculate baseline alignment per text line ---
         line_baselines = defaultdict(list)
         for c in self.characters:
             line_baselines[c['line_idx']].append(c['y'] + c['height'])
@@ -325,8 +301,6 @@ class DocumentForgeryDetector:
         for char in self.characters:
             scores = []
             types = []
-
-            # --- GLOBAL GEOMETRIC ANOMALIES ---
             h_z = abs(char['height'] - stats['height_mean']) / (stats['height_std'] + 1e-6)
             if h_z > sensitivity:
                 scores.append(h_z)
@@ -342,7 +316,6 @@ class DocumentForgeryDetector:
                 scores.append(ar_z)
                 types.append('GLOBAL_ASPECT_RATIO_OUTLIER')
 
-            # --- INK / STROKE CONSISTENCY ---
             ink_z = abs(char.get('mean_ink_intensity', stats['ink_mean']) - stats['ink_mean']) / (stats['ink_std'] + 1e-6)
             if ink_z > sensitivity:
                 scores.append(ink_z)
@@ -353,7 +326,6 @@ class DocumentForgeryDetector:
                 scores.append(grad_z)
                 types.append('EDGE_GRADIENT_ANOMALY')
 
-            # --- ALIGNMENT DRIFT ---
             char_base = char['y'] + char['height']
             if abs(char_base - line_avg_y.get(char['line_idx'], char_base)) > stats['height_std']:
                 scores.append(2.0)
@@ -468,14 +440,11 @@ class DocumentForgeryDetector:
 
     def identify_critical_entities_from_ocr(self):
         """
-        - OCR-normalized, space-tolerant
-        - Robust label anchoring
-        - Geometry-safe linking
-        - NER recall metrics
-        - ML-aligned outputs
+        Extracts and validates structured information from OCR results using geometric proximity and pattern matching.
         """
 
         def normalize(text):
+            # Standardizes text for robust matching.
             text = text.upper()
             text = unicodedata.normalize("NFKD", text)
             text = "".join(c for c in text if not unicodedata.combining(c))
@@ -483,10 +452,7 @@ class DocumentForgeryDetector:
             text = re.sub(r'\s+', ' ', text)
             return text.strip()
 
-
-        # ============================================================
-        # STAGE 0: BBOX SANITIZATION (INT-ONLY, SAFE FOR SLICING)
-        # ============================================================
+        # Sanitize and validate bounding box geometry to prevent slicing errors
         boxes = []
         for box in self.ocr_boxes:
             bbox = box.get("bbox")
@@ -516,6 +482,7 @@ class DocumentForgeryDetector:
         def y_mid(b): return (b[1] + b[3]) // 2
 
         def is_label_like(text):
+            # Determines if a string matches known document field labels.
             return any(re.search(p, text) for p in (
                 r'MBIEMR', r'SURNAME',
                 r'EMR', r'GIVEN',
@@ -529,12 +496,9 @@ class DocumentForgeryDetector:
                 r'FIRM', r'SIGN'
             ))
 
-        # ============================================================
-        # STAGE 1: SAFE REGEX ENTITIES 
-        # ============================================================
+        # Direct Entity Extraction: Identify fields with distinct, globally unique patterns
         entities = {}
         used = set()
-
         strong_patterns = {
             "PERSONAL NO": r'[A-Z]\d{7,9}[A-Z]',
             "ID CARD NO": r'\d{7,10}',
@@ -549,9 +513,7 @@ class DocumentForgeryDetector:
                     entities[label] = box
                     used.add(i)
 
-        # ============================================================
-        # STAGE 2: LABEL ANCHORS (ROOT-BASED, SPACE-TOLERANT)
-        # ============================================================
+        # Label Anchor Detection: Locate specific headers to act as geometric reference points.
         label_map = {
             r'MBIEMR|SURNAME': 'SURNAME',
             r'EMR|GIVEN': 'GIVEN NAME',
@@ -574,9 +536,7 @@ class DocumentForgeryDetector:
                     anchors.append((i, label))
                     break
 
-        # ============================================================
-        # STAGE 3: GEOMETRIC VALUE LINKING
-        # ============================================================
+        # Geometric Value Association: Link anchors to adjacent values using a weighted distance cost.
         for idx, label in anchors:
             if label in entities:
                 continue
@@ -592,18 +552,14 @@ class DocumentForgeryDetector:
                     continue
                 if is_label_like(box["norm"]):
                     continue
-
                 vy = y_mid(box["bbox"])
                 dx = box["bbox"][0] - ax
                 dy = box["bbox"][1] - anchor["bbox"][3]
-
                 if not (
                     (0 < dx < 450 and abs(vy - ay) <= 45) or
                     (0 <= dy <= 80)
                 ):
                     continue
-
-
                 score = abs(vy - ay) * 80 + dx
                 if score < best_score:
                     best_score = score
@@ -613,9 +569,7 @@ class DocumentForgeryDetector:
                 entities[label] = boxes[best_idx]
                 used.add(best_idx)
 
-        # ============================================================
-        # FINAL SAFE OUTPUT
-        # ============================================================
+        # Finalize structured Named Entity Recognition (NER) output
         self.ner_entities = {
             k: {
                 "text": v["text"],
@@ -625,9 +579,7 @@ class DocumentForgeryDetector:
             for k, v in entities.items()
         }
 
-        # ============================================================
-        # NER RECALL METRICS (IMPORTANT)
-        # ============================================================
+        # Calculate Recall Metrics: Evaluate extraction completeness for forensic reporting.
         EXPECTED_FIELDS = {
             'SURNAME',
             'GIVEN NAME',
@@ -643,7 +595,6 @@ class DocumentForgeryDetector:
         }
 
         detected = set(self.ner_entities.keys())
-
         self.ner_metrics = {
             "detected_fields": sorted(detected),
             "missing_fields": sorted(EXPECTED_FIELDS - detected),
@@ -651,12 +602,9 @@ class DocumentForgeryDetector:
             "expected_count": len(EXPECTED_FIELDS),
             "ner_recall": len(detected) / len(EXPECTED_FIELDS)
         }
-
         self.missing_ner_fields = self.ner_metrics["missing_fields"]
 
-        # ============================================================
-        # DEBUG
-        # ============================================================
+        # Log findings
         print("\n[NER FIELDS]")
         for k in sorted(self.ner_entities):
             print(f"  {k:18s}: {self.ner_entities[k]['text']}")
@@ -666,7 +614,7 @@ class DocumentForgeryDetector:
 
 
     def perform_ocr(self):
-        """PaddleOCR implementation using the shared engine."""
+        """Initializes and executes the PaddleOCR engine to retrieve raw text and spatial data."""
         self.log.append("- OCR: Starting PaddleOCR.")
         
         # Use the injected engine if available, otherwise fallback to creating one
@@ -676,12 +624,10 @@ class DocumentForgeryDetector:
                 self.log.append("- OCR failed: Library not found.")
                 return
             self.ocr_engine = PaddleOCR(use_angle_cls=True, lang='en', use_gpu=False, show_log=False)
-
         try:
-            # FORCE detection_limit or use_dilation if text is thin
             result = self.ocr_engine.ocr(np.array(self.original_image), cls=True)
             self.ocr_boxes = []
-            
+
             if not result or not result[0]:
                 print("[DEBUG] PaddleOCR returned NOTHING.")
                 return
@@ -710,12 +656,11 @@ class DocumentForgeryDetector:
     
     def generate_training_features(self):
         """
-        Derives a comprehensive feature vector containing all quantifiable metrics 
-        from character statistics, background analysis, and anomaly counts. 
+        Derives a forensic feature vector for machine learning integration. 
         """
         self.log.append("- Deriving Comprehensive Feature Vector for ML.")
         
-        # --- 1. Baseline Character Statistics (Global means and STDs) ---
+        # Baseline Character Statistics (Global means and STDs)
         stats = self.baseline_stats if self.baseline_stats else {}
         total_chars = len(self.characters)
         
@@ -730,7 +675,7 @@ class DocumentForgeryDetector:
         )
 
 
-        # --- 3. Feature Vector Assembly ---
+        # Feature Vector Assembly 
         self.forgery_features = {
             'Char_Count': total_chars,
             'NER_Detected_Count': self.ner_completeness['detected_count']
@@ -788,32 +733,24 @@ class DocumentForgeryDetector:
             raise
     def visualize_results(self, save_path=None):
         """
-        High-visibility visualization for FYP results.
         Visualization logic is synchronized with:
         - ML verdict during inference
         - Ground truth during training dataset generation
         """
 
-        # Case 1: ML-based inference (predict_one.py)
+        # Case 1: ML-based inference
         if hasattr(self, "ml_verdict"):
             verdict = self.ml_verdict
             show_anomalies = verdict == "FORGED"
-
         # Case 2: Training dataset visualization
         elif hasattr(self, "is_training_doc"):
             verdict = "FORGED" if self.is_forged_gt else "AUTHENTIC"
             show_anomalies = self.is_forged_gt
-
-        # Case 3: Fallback (should rarely be used)
         else:
             verdict = "AUTHENTIC"
             show_anomalies = False
 
         is_forged = verdict == "FORGED"
-
-        # ------------------------------------------------------------
-        # Start visualization from original
-        # ------------------------------------------------------------
         vis = self.display_image.copy()
 
         # 1. OCR boxes (Yellow)
@@ -836,9 +773,6 @@ class DocumentForgeryDetector:
                     x1, y1, x2, y2 = a['char']['bbox']
                     cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 0, 255), 3)
 
-        # ------------------------------------------------------------
-        # Display side-by-side
-        # ------------------------------------------------------------
         orig_rgb = cv2.cvtColor(self.display_image, cv2.COLOR_BGR2RGB)
         vis_rgb  = cv2.cvtColor(vis, cv2.COLOR_BGR2RGB)
 
@@ -896,14 +830,14 @@ class DocumentForgeryDetector:
         else: report.append("  - None detected.")
         report.append("-" * 80)
         
-        # --- Feature Vector (The Training Feature) ---
+        # Feature Vector (The Training Feature) 
         report.append("ML Training Feature Vector (All Metrics):")
         report.append(f"Total Metrics Collected: {len(self.forgery_features)}")
         for name, value in self.forgery_features.items():
              report.append(f"  - {name.ljust(25)} : {value:.4f}")
         report.append("-" * 80)
 
-        # --- FINAL VERDICT (Heuristic Placeholder for UNTRAINED ML) ---
+        # FINAL VERDICT
         total_suspicion_score = (len(self.anomalies) * 1) + (len(self.background_anomalies) * 5) + (len(self.ocr_box_anomalies) * 10) + (len(self.suspicious_regions) * 15)
         
         if self.forgery_issues:
@@ -1038,7 +972,6 @@ def generate_datasets(input_dir="input_docs"):
         is_forged = 'fake' in doc_name.lower()
         label = 1 if is_forged else 0
 
-       # Still allow forged docs to be processed for ML
         if is_forged:
             summary['actual_forged'] += 1
         else:
@@ -1053,11 +986,9 @@ def generate_datasets(input_dir="input_docs"):
             detector.is_forged_gt = is_forged
             detector.process_document()
             
-            # Save visual result
             output_png = os.path.join(out_folder, f"{doc_root}_analysis.png")
             detector.visualize_results(save_path=output_png)
             
-            # Check if our heuristic flagged it as forged
             if "FORGED" in detector.final_verdict.upper():
                 summary['detected_as_forged'] += 1
 
@@ -1079,7 +1010,7 @@ def generate_datasets(input_dir="input_docs"):
     if training_data: write_csv(training_data, "ml_training_data.csv")
     if test_data: write_csv(test_data, "ml_test_data.csv")
 
-    # --- PRINT SUMMARY TABLE ---
+    # PRINT SUMMARY TABLE 
     print("\n" + "="*50)
     print("         PROCESSING SUMMARY REPORT")
     print("="*50)
@@ -1121,14 +1052,6 @@ def cleanup_results_folder(folder_path="PNG_results"):
 if __name__ == "__main__":
 
     cleanup_results_folder()
-    # --- RUN THIS FUNCTION TO GENERATE YOUR ML TRAINING DATASET (ml_training_data.csv) ---
+    # Generate ml_training_data.csv
     generate_datasets()
-    
-    # --- OR UNCOMMENT BELOW TO RUN A SINGLE DOCUMENT ANALYSIS ---
-    # document_to_analyze = "input_docs/alb_id_00.jpg"
-    # try:
-    #     detector = analyze_single_document(
-    #         document_to_analyze, char_sensitivity=2.0, bg_sensitivity=3.0, ocr_sensitivity=2.5    
-    #     )
-    # except FileNotFoundError:
-    #     print("\nCRITICAL ERROR: Input document not found. Please check path.")
+    # Run this to generate a single document analysis
