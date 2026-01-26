@@ -1,0 +1,577 @@
+"""
+Document Forgery Detection System using Character Segmentation
+A Computer Vision approach for detecting tampered regions in financial documents
+Author: Eldeena Lim - FYP Project
+Supports: PNG, TIFF, JPEG, BMP formats
+"""
+
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+from collections import defaultdict
+import warnings
+import os
+from PIL import Image
+warnings.filterwarnings('ignore')
+
+class DocumentForgeryDetector:
+    """
+    Character-level forgery detection system that identifies inconsistencies
+    in font sizes, alignment, and spacing across document regions.
+    """
+    
+    def __init__(self, image_path, is_genuine=False):
+        """
+        Initialize the detector with an image path.
+        
+        Args:
+            image_path: Path to the document image (supports TIFF, PNG, JPEG, BMP)
+            is_genuine: Whether this is a known genuine document (for baseline)
+        """
+        self.image_path = image_path
+        self.is_genuine = is_genuine
+        
+        # Check if file exists
+        if not os.path.exists(image_path):
+            raise FileNotFoundError(f"Image file not found: {image_path}")
+        
+        # Load TIFF files using PIL first, then convert to OpenCV format
+        try:
+            # Try PIL/Pillow for TIFF support
+            pil_image = Image.open(image_path)
+            
+            # Convert PIL image to numpy array
+            image_array = np.array(pil_image)
+            
+            # Handle different image modes
+            if len(image_array.shape) == 2:  # Grayscale
+                self.gray = image_array
+                self.original_image = cv2.cvtColor(self.gray, cv2.COLOR_GRAY2BGR)
+            elif image_array.shape[2] == 3:  # RGB
+                self.original_image = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
+                self.gray = cv2.cvtColor(self.original_image, cv2.COLOR_BGR2GRAY)
+            elif image_array.shape[2] == 4:  # RGBA
+                # Remove alpha channel
+                rgb_array = image_array[:, :, :3]
+                self.original_image = cv2.cvtColor(rgb_array, cv2.COLOR_RGB2BGR)
+                self.gray = cv2.cvtColor(self.original_image, cv2.COLOR_BGR2GRAY)
+            else:
+                raise ValueError(f"Unsupported image format with shape: {image_array.shape}")
+                
+        except Exception as e:
+            print(f"⚠ PIL loading failed: {e}")
+            # Fallback to OpenCV
+            self.original_image = cv2.imread(image_path)
+            if self.original_image is None:
+                raise ValueError(f"Failed to load image with both PIL and OpenCV: {image_path}")
+            self.gray = cv2.cvtColor(self.original_image, cv2.COLOR_BGR2GRAY)
+        
+        self.height, self.width = self.gray.shape
+        
+        # Storage for analysis results
+        self.characters = []
+        self.text_regions = []
+        self.anomalies = []
+        self.baseline_stats = None
+        
+        print(f"✓ Loaded: {os.path.basename(image_path)} ({self.width}x{self.height})")
+        
+    def preprocess_image(self):
+        """
+        Enhance image quality for better character detection.
+        """
+        print("  Preprocessing image...")
+        
+        # Apply adaptive thresholding for better text extraction
+        binary = cv2.adaptiveThreshold(
+            self.gray, 255, 
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+            cv2.THRESH_BINARY_INV, 11, 2
+        )
+        
+        # Noise reduction
+        denoised = cv2.fastNlMeansDenoising(binary, None, 10, 7, 21)
+        
+        # Morphological operations to connect broken characters
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        morph = cv2.morphologyEx(denoised, cv2.MORPH_CLOSE, kernel)
+        
+        self.binary = morph
+        print("  ✓ Preprocessing complete")
+        return morph
+    
+    def detect_text_regions(self):
+        """
+        Identify text regions using horizontal and vertical projections.
+        """
+        print("  Detecting text regions...")
+        
+        # Horizontal projection to find text lines
+        horizontal_projection = np.sum(self.binary, axis=1)
+        
+        # Find text line boundaries
+        lines = []
+        in_line = False
+        start = 0
+        
+        threshold = np.max(horizontal_projection) * 0.1
+        
+        for i, val in enumerate(horizontal_projection):
+            if val > threshold and not in_line:
+                start = i
+                in_line = True
+            elif val <= threshold and in_line:
+                if i - start > 5:  # Minimum line height
+                    lines.append((start, i))
+                in_line = False
+        
+        self.text_lines = lines
+        print(f"  ✓ Detected {len(lines)} text lines")
+        return lines
+    
+    def segment_characters(self):
+        """
+        Segment individual characters from each text line.
+        Returns detailed character bounding boxes with metrics.
+        """
+        print("  Segmenting characters...")
+        characters = []
+        
+        for line_idx, (y_start, y_end) in enumerate(self.text_lines):
+            # Extract line region
+            line_roi = self.binary[y_start:y_end, :]
+            
+            # Vertical projection to find character boundaries
+            vertical_projection = np.sum(line_roi, axis=0)
+            
+            # Find character boundaries
+            in_char = False
+            char_start = 0
+            threshold = np.max(vertical_projection) * 0.1 if np.max(vertical_projection) > 0 else 0
+            
+            for x, val in enumerate(vertical_projection):
+                if val > threshold and not in_char:
+                    char_start = x
+                    in_char = True
+                elif val <= threshold and in_char:
+                    if x - char_start > 3:  # Minimum character width
+                        # Calculate character metrics
+                        char_roi = line_roi[:, char_start:x]
+                        char_height = y_end - y_start
+                        char_width = x - char_start
+                        
+                        # Calculate aspect ratio
+                        aspect_ratio = char_width / char_height if char_height > 0 else 0
+                        
+                        # Calculate density (filled pixels ratio)
+                        total_pixels = char_width * char_height
+                        density = np.sum(char_roi > 0) / total_pixels if total_pixels > 0 else 0
+                        
+                        # Store character information
+                        char_info = {
+                            'x': char_start,
+                            'y': y_start,
+                            'width': char_width,
+                            'height': char_height,
+                            'aspect_ratio': aspect_ratio,
+                            'density': density,
+                            'line_idx': line_idx,
+                            'bbox': (char_start, y_start, x, y_end)
+                        }
+                        characters.append(char_info)
+                    
+                    in_char = False
+        
+        self.characters = characters
+        print(f"  ✓ Segmented {len(characters)} characters")
+        return characters
+    
+    def calculate_baseline_statistics(self):
+        """
+        Calculate statistical baseline for character properties.
+        Essential for genuine document profiling.
+        """
+        if not self.characters:
+            print("  ⚠ No characters detected for statistics calculation")
+            return None
+        
+        print("  Calculating baseline statistics...")
+        
+        heights = [c['height'] for c in self.characters]
+        widths = [c['width'] for c in self.characters]
+        aspect_ratios = [c['aspect_ratio'] for c in self.characters]
+        densities = [c['density'] for c in self.characters]
+        
+        # Group by text lines for line-specific analysis
+        line_stats = defaultdict(lambda: {'heights': [], 'widths': []})
+        for char in self.characters:
+            line_idx = char['line_idx']
+            line_stats[line_idx]['heights'].append(char['height'])
+            line_stats[line_idx]['widths'].append(char['width'])
+        
+        stats = {
+            'height_mean': np.mean(heights),
+            'height_std': np.std(heights),
+            'height_median': np.median(heights),
+            'width_mean': np.mean(widths),
+            'width_std': np.std(widths),
+            'aspect_ratio_mean': np.mean(aspect_ratios),
+            'aspect_ratio_std': np.std(aspect_ratios),
+            'density_mean': np.mean(densities),
+            'density_std': np.std(densities),
+            'line_stats': dict(line_stats),
+            'total_chars': len(self.characters)
+        }
+        
+        self.baseline_stats = stats
+        print("  ✓ Statistics calculated")
+        return stats
+    
+    def detect_anomalies(self, sensitivity=2.0):
+        """
+        Detect character-level anomalies based on statistical deviations.
+        
+        Args:
+            sensitivity: Number of standard deviations for anomaly threshold
+        """
+        print(f"  Detecting anomalies (sensitivity={sensitivity})...")
+        
+        if not self.baseline_stats:
+            self.calculate_baseline_statistics()
+        
+        if not self.baseline_stats:
+            print("  ⚠ Cannot detect anomalies without baseline statistics")
+            return []
+        
+        anomalies = []
+        stats = self.baseline_stats
+        
+        for char in self.characters:
+            anomaly_scores = []
+            anomaly_types = []
+            
+            # Height anomaly detection
+            height_z_score = abs(char['height'] - stats['height_mean']) / (stats['height_std'] + 1e-6)
+            if height_z_score > sensitivity:
+                anomaly_scores.append(height_z_score)
+                anomaly_types.append('height')
+            
+            # Width anomaly detection
+            width_z_score = abs(char['width'] - stats['width_mean']) / (stats['width_std'] + 1e-6)
+            if width_z_score > sensitivity:
+                anomaly_scores.append(width_z_score)
+                anomaly_types.append('width')
+            
+            # Aspect ratio anomaly
+            ar_z_score = abs(char['aspect_ratio'] - stats['aspect_ratio_mean']) / (stats['aspect_ratio_std'] + 1e-6)
+            if ar_z_score > sensitivity:
+                anomaly_scores.append(ar_z_score)
+                anomaly_types.append('aspect_ratio')
+            
+            # Density anomaly
+            density_z_score = abs(char['density'] - stats['density_mean']) / (stats['density_std'] + 1e-6)
+            if density_z_score > sensitivity:
+                anomaly_scores.append(density_z_score)
+                anomaly_types.append('density')
+            
+            # If anomalies detected
+            if anomaly_scores:
+                anomaly = {
+                    'char': char,
+                    'scores': anomaly_scores,
+                    'types': anomaly_types,
+                    'max_score': max(anomaly_scores),
+                    'severity': 'high' if max(anomaly_scores) > sensitivity * 1.5 else 'medium'
+                }
+                anomalies.append(anomaly)
+        
+        self.anomalies = sorted(anomalies, key=lambda x: x['max_score'], reverse=True)
+        print(f"  ✓ Detected {len(anomalies)} anomalous characters")
+        return self.anomalies
+    
+    def cluster_anomalous_regions(self, proximity_threshold=50):
+        """
+        Group nearby anomalous characters into suspicious regions.
+        This helps identify forged areas rather than individual characters.
+        """
+        print("  Clustering anomalous regions...")
+        
+        if not self.anomalies:
+            print("  ⚠ No anomalies to cluster")
+            return []
+        
+        # Extract bounding boxes of anomalous characters
+        anomaly_boxes = [a['char']['bbox'] for a in self.anomalies]
+        
+        # Cluster nearby boxes
+        regions = []
+        used = set()
+        
+        for i, box1 in enumerate(anomaly_boxes):
+            if i in used:
+                continue
+            
+            # Start a new region
+            x1, y1, x2, y2 = box1
+            region_boxes = [i]
+            used.add(i)
+            
+            # Find nearby anomalies
+            for j, box2 in enumerate(anomaly_boxes):
+                if j in used:
+                    continue
+                
+                bx1, by1, bx2, by2 = box2
+                
+                # Check proximity (Euclidean distance between centers)
+                center1 = ((x1 + x2) / 2, (y1 + y2) / 2)
+                center2 = ((bx1 + bx2) / 2, (by1 + by2) / 2)
+                distance = np.sqrt((center1[0] - center2[0])**2 + (center1[1] - center2[1])**2)
+                
+                if distance < proximity_threshold:
+                    region_boxes.append(j)
+                    used.add(j)
+                    # Expand region boundaries
+                    x1 = min(x1, bx1)
+                    y1 = min(y1, by1)
+                    x2 = max(x2, bx2)
+                    y2 = max(y2, by2)
+            
+            # Add padding to region
+            padding = 10
+            x1 = max(0, x1 - padding)
+            y1 = max(0, y1 - padding)
+            x2 = min(self.width, x2 + padding)
+            y2 = min(self.height, y2 + padding)
+            
+            regions.append({
+                'bbox': (x1, y1, x2, y2),
+                'anomaly_count': len(region_boxes),
+                'avg_severity': np.mean([self.anomalies[idx]['max_score'] for idx in region_boxes])
+            })
+        
+        self.suspicious_regions = sorted(regions, key=lambda x: x['avg_severity'], reverse=True)
+        print(f"  ✓ Found {len(self.suspicious_regions)} suspicious regions")
+        return self.suspicious_regions
+    
+    def visualize_results(self, show_characters=True, show_anomalies=True, show_regions=True):
+        """
+        Create comprehensive visualization of detection results.
+        """
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        
+        # Original image
+        axes[0, 0].imshow(cv2.cvtColor(self.original_image, cv2.COLOR_BGR2RGB))
+        axes[0, 0].set_title('Original Document', fontsize=14, fontweight='bold')
+        axes[0, 0].axis('off')
+        
+        # Binary processed image
+        axes[0, 1].imshow(self.binary, cmap='gray')
+        axes[0, 1].set_title('Preprocessed Binary Image', fontsize=14, fontweight='bold')
+        axes[0, 1].axis('off')
+        
+        # Character segmentation visualization
+        char_vis = self.original_image.copy()
+        if show_characters and self.characters:
+            for char in self.characters:
+                x1, y1, x2, y2 = char['bbox']
+                cv2.rectangle(char_vis, (x1, y1), (x2, y2), (0, 255, 0), 1)
+        
+        axes[1, 0].imshow(cv2.cvtColor(char_vis, cv2.COLOR_BGR2RGB))
+        axes[1, 0].set_title(f'Character Segmentation ({len(self.characters)} chars)', 
+                            fontsize=14, fontweight='bold')
+        axes[1, 0].axis('off')
+        
+        # Forgery detection visualization
+        forgery_vis = self.original_image.copy()
+        
+        if show_anomalies and self.anomalies:
+            for anomaly in self.anomalies:
+                char = anomaly['char']
+                x1, y1, x2, y2 = char['bbox']
+                color = (0, 0, 255) if anomaly['severity'] == 'high' else (255, 165, 0)
+                cv2.rectangle(forgery_vis, (x1, y1), (x2, y2), color, 2)
+        
+        if show_regions and hasattr(self, 'suspicious_regions'):
+            for region in self.suspicious_regions:
+                x1, y1, x2, y2 = [int(v) for v in region['bbox']]
+                cv2.rectangle(forgery_vis, (x1, y1), (x2, y2), (255, 0, 0), 3)
+                
+                # Add label
+                label = f"Forged (Score: {region['avg_severity']:.2f})"
+                cv2.putText(forgery_vis, label, (x1, y1 - 10), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+        
+        axes[1, 1].imshow(cv2.cvtColor(forgery_vis, cv2.COLOR_BGR2RGB))
+        title = 'Forgery Detection Results'
+        if hasattr(self, 'suspicious_regions'):
+            title += f' ({len(self.suspicious_regions)} suspicious regions)'
+        axes[1, 1].set_title(title, fontsize=14, fontweight='bold')
+        axes[1, 1].axis('off')
+        
+        plt.tight_layout()
+        return fig
+    
+    def generate_report(self):
+        """
+        Generate detailed analysis report.
+        """
+        report = []
+        report.append("=" * 60)
+        report.append("DOCUMENT FORGERY DETECTION REPORT")
+        report.append("=" * 60)
+        report.append(f"Document: {os.path.basename(self.image_path)}")
+        report.append(f"Type: {'GENUINE (Baseline)' if self.is_genuine else 'UNDER ANALYSIS'}")
+        report.append(f"Total Characters Detected: {len(self.characters)}")
+        report.append("")
+        
+        if self.baseline_stats:
+            report.append("CHARACTER STATISTICS:")
+            report.append(f"  Height: μ={self.baseline_stats['height_mean']:.2f}, "
+                         f"σ={self.baseline_stats['height_std']:.2f}")
+            report.append(f"  Width: μ={self.baseline_stats['width_mean']:.2f}, "
+                         f"σ={self.baseline_stats['width_std']:.2f}")
+            report.append(f"  Aspect Ratio: μ={self.baseline_stats['aspect_ratio_mean']:.3f}, "
+                         f"σ={self.baseline_stats['aspect_ratio_std']:.3f}")
+            report.append("")
+        
+        if self.anomalies:
+            report.append(f"ANOMALIES DETECTED: {len(self.anomalies)}")
+            report.append("")
+            
+            # Top anomalies
+            for i, anomaly in enumerate(self.anomalies[:10], 1):
+                char = anomaly['char']
+                report.append(f"  {i}. Position: ({char['x']}, {char['y']})")
+                report.append(f"     Size: {char['width']}x{char['height']} px")
+                report.append(f"     Anomaly Types: {', '.join(anomaly['types'])}")
+                report.append(f"     Severity: {anomaly['severity'].upper()}")
+                report.append(f"     Max Score: {anomaly['max_score']:.2f}")
+                report.append("")
+        
+        if hasattr(self, 'suspicious_regions'):
+            report.append(f"SUSPICIOUS REGIONS: {len(self.suspicious_regions)}")
+            for i, region in enumerate(self.suspicious_regions, 1):
+                x1, y1, x2, y2 = region['bbox']
+                report.append(f"  Region {i}: [{x1:.0f}, {y1:.0f}] to [{x2:.0f}, {y2:.0f}]")
+                report.append(f"    Anomaly Count: {region['anomaly_count']}")
+                report.append(f"    Average Severity Score: {region['avg_severity']:.2f}")
+                report.append("")
+        
+        verdict = "GENUINE" if len(self.anomalies) < 5 else "POTENTIALLY FORGED"
+        confidence = min(100, len(self.anomalies) * 10)
+        
+        report.append("=" * 60)
+        report.append(f"VERDICT: {verdict}")
+        report.append(f"CONFIDENCE: {confidence}%")
+        report.append("=" * 60)
+        
+        return "\n".join(report)
+
+def ensure_output_folder():
+    folder = "PNG_results"
+    os.makedirs(folder, exist_ok=True)
+    return folder
+
+def compare_documents(genuine_path, tampered_path, sensitivity=2.0):
+    """
+    Compare genuine and potentially tampered documents.
+    
+    Args:
+        genuine_path: Path to known genuine document
+        tampered_path: Path to suspected tampered document
+        sensitivity: Detection sensitivity threshold
+    """
+    print("\n" + "="*60)
+    print("DOCUMENT FORGERY DETECTION SYSTEM")
+    print("="*60)
+    
+    # ------------------------------------------------------------------
+    # Prepare output folder & filenames
+    # ------------------------------------------------------------------
+    out_folder = ensure_output_folder()
+    
+    genuine_name = os.path.splitext(os.path.basename(genuine_path))[0]
+    tampered_name = os.path.splitext(os.path.basename(tampered_path))[0]
+    
+    genuine_png = os.path.join(out_folder, f"{genuine_name}_genuine.PNG")
+    tampered_png = os.path.join(out_folder, f"{tampered_name}_forged.PNG")
+    
+    # ------------------------------------------------------------------
+    # Process genuine document (baseline)
+    # ------------------------------------------------------------------
+    print("\nProcessing genuine document (establishing baseline)...")
+    genuine_detector = DocumentForgeryDetector(genuine_path, is_genuine=True)
+    genuine_detector.preprocess_image()
+    genuine_detector.detect_text_regions()
+    genuine_detector.segment_characters()
+    genuine_detector.calculate_baseline_statistics()
+    
+    # ------------------------------------------------------------------
+    # Process suspected document
+    # ------------------------------------------------------------------
+    print("\nProcessing suspected document...")
+    tampered_detector = DocumentForgeryDetector(tampered_path, is_genuine=False)
+    tampered_detector.preprocess_image()
+    tampered_detector.detect_text_regions()
+    tampered_detector.segment_characters()
+    tampered_detector.calculate_baseline_statistics()
+    tampered_detector.detect_anomalies(sensitivity=sensitivity)
+    tampered_detector.cluster_anomalous_regions()
+    
+    # ------------------------------------------------------------------
+    # Generate textual reports
+    # ------------------------------------------------------------------
+    print("\n" + genuine_detector.generate_report())
+    print("\n" + tampered_detector.generate_report())
+    
+    # ------------------------------------------------------------------
+    # Visualise & SAVE as PNG in the required format
+    # ------------------------------------------------------------------
+    print("\nGenerating visualizations...")
+    
+    # Genuine visualisation (no anomalies/regions)
+    genuine_fig = genuine_detector.visualize_results(
+        show_anomalies=False, show_regions=False
+    )
+    genuine_fig.savefig(genuine_png, dpi=150, bbox_inches='tight', format='png')
+    plt.close(genuine_fig)
+    print(f"✓ Saved: {genuine_png}")
+    
+    # Tampered visualisation (full detection)
+    tampered_fig = tampered_detector.visualize_results()
+    tampered_fig.savefig(tampered_png, dpi=150, bbox_inches='tight', format='png')
+    plt.close(tampered_fig)
+    print(f"✓ Saved: {tampered_png}")
+    
+    # Show the figures in the notebook / interactive session
+    plt.show()
+    
+    return genuine_detector, tampered_detector
+
+if __name__ == "__main__":
+    # Replace with your actual TIFF file paths
+    genuine_document = "input_docs/PaySlip_CantarellRegular_12_5b-g.tif"
+    tampered_document = "input_docs/PaySlip_CantarellRegular_12_5b-f_2.tif"
+    
+    try:
+        # Run comparative analysis
+        genuine_det, tampered_det = compare_documents(
+            genuine_document, 
+            tampered_document,
+            sensitivity=2.0  # Adjust for detection sensitivity
+        )
+        
+        print("\n" + "="*60)
+        print("Analysis complete! Check the generated PNGs in the 'PNG_results' folder.")
+        print("="*60)
+        
+    except FileNotFoundError as e:
+        print(f"\n Error: {e}")
+        print("\n Please check your file paths:")
+        print(f"  Genuine: {genuine_document}")
+        print(f"  Tampered: {tampered_document}")
+    except Exception as e:
+        print(f"\n Unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
