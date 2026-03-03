@@ -18,7 +18,7 @@ from forged_document_detector import DocumentForgeryDetector, ensure_output_fold
 # ============================================================
 
 # Image to be predicted (unseen documents)
-NEW_IMAGE_PATH = "more_docs/alb_id_38_fake_6_107.jpg"
+NEW_IMAGE_PATH = "more_docs/alb_id_53_fake_6_46.jpg"
 
 # Paths produced by ml_model_training.ipynb
 MODEL_PATH = "trained_models/forged_document_rf_model.pkl"
