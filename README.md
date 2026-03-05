@@ -41,16 +41,22 @@ How to Run
 - Environment Setup: Ensure Python 3.x is installed along with dependencies:
 pip install opencv-python paddleocr paddlepaddle scikit-learn pandas matplotlib
 
-- Generate Dataset (multi-country): Run forged_document_detector.py to process images from both input_docs and more_docs.
+- Generate Dataset (multi-country): Run forged_document_detector.py to process training images from `input_docs` only.
   - Filenames should follow <country>_...jpg format (e.g., alb_id_00.jpg, lva_passport_01.jpg, svk_id_02.jpg).
   - The generated CSV now includes Country_Code so the model can generalize across nationalities.
 
+- Unseen Evaluation Data: Keep `more_docs` as unseen samples for `predict_one.py` (single-image inference), not for model training.
 - Train Model: Run `python ml_model_training.py` to train a country-aware RandomForest model and save:
   - `trained_models/forged_document_rf_model.pkl`
   - `trained_models/feature_preprocessor.pkl`
   - `trained_models/training_metrics.json`
-- Single Prediction:
+
+  - Single Prediction:
  `python predict_one.py` (uses `forged_document_rf_model.pkl`)
 
-This prototype serves as a Proof of Concept (PoC). While current testing on the Albanian Passport subset shows a strong recall rate of 66.67% (effectively catching two-thirds of forgeries), future iterations (FYP 2) will focus on Error Level Analysis (ELA) and Cross-field Semantic Validation (matching Visual Zone to MRZ checksums) to further reduce false negatives in high-stakes financial environments.
+- Output Artifacts per processed file:
+  - OCR JSON: `results/OCR_JSON_results/<doc_name>.json`
+  - Visualization PNG: `PNG_results/<doc_name>_analysis.png`
+
+This prototype serves as a Proof of Concept (PoC).
 
