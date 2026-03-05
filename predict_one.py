@@ -4,69 +4,47 @@ Created By: Eldeena Lim Huey Yinn
 Student ID: 1211111904
 
 File: predict_one.py
-Functionality: Combines forensic CV extraction with the trained Random Forest verdict.
+Functionality: Run single-image inference using the country-aware RandomForest pipeline.
 
 """
 import os
-import joblib
+import pickle
 import pandas as pd
-import numpy as np
-from forged_document_detector import DocumentForgeryDetector, ensure_output_folder
-
-# ============================================================
-# CONFIGURATION: MODEL AND SCHEMA PATHS
-# ============================================================
+from forged_document_detector import DocumentForgeryDetector, ensure_output_folder, extract_country_code
 
 # Image to be predicted (unseen documents)
 NEW_IMAGE_PATH = "more_docs/alb_id_53_fake_6_46.jpg"
 
 # Paths produced by ml_model_training.ipynb
 MODEL_PATH = "trained_models/forged_document_rf_model.pkl"
-FEATURE_COLUMNS_PATH = "trained_models/feature_columns.pkl"
 
 # Load model artifacts
 try:
-    model = joblib.load(MODEL_PATH)
-    feature_columns = joblib.load(FEATURE_COLUMNS_PATH)
-    print("[INFO] Trained model and feature schema loaded successfully.")
+    with open(MODEL_PATH, "rb") as f:
+        model = pickle.load(f)
+    print("[INFO] Trained model pipeline loaded successfully.")
 except Exception as e:
-    raise RuntimeError(f"[FATAL] Failed to load model artifacts: {e}")
-
-# ============================================================
-# SINGLE DOCUMENT PREDICTION FUNCTION
-# ============================================================
+    raise RuntimeError(f"[FATAL] Failed to load model artifact: {e}")
 
 def predict_single_document(image_path):
-    """
-    Executes end-to-end authentication for a single document.
-    1. Extracts CV features.
-    2. Aligns features with the trained ML schema.
-    3. Returns classification verdict and confidence.
-    """
-
-    # 1. Initialize forensic detector
+    """Extract features and run final forged/authentic prediction."""
     detector = DocumentForgeryDetector(image_path)
     detector.process_document()
 
-    # 2. Convert features to DataFrame
-    feature_dict = detector.forgery_features
+    feature_dict = detector.forgery_features.copy()
+    feature_dict["Country_Code"] = extract_country_code(os.path.basename(image_path))
+
     X_input = pd.DataFrame([feature_dict])
 
-    # 3. Enforce exact training feature order
-    X_input = X_input.reindex(columns=feature_columns, fill_value=0)
-    X_input = X_input.replace([np.inf, -np.inf], 0)
-
-    # 4. ML prediction
-    pred_label = model.predict(X_input)[0]
+    pred_label = int(model.predict(X_input)[0])
     pred_proba = model.predict_proba(X_input)[0]
 
     verdict = "FORGED" if pred_label == 1 else "AUTHENTIC"
-    confidence = pred_proba[pred_label] * 100
+    confidence = float(pred_proba[pred_label]) * 100.0
 
     detector.ml_verdict = verdict
     detector.ml_confidence = confidence
 
-    # 5. Save visualization
     ensure_output_folder()
     out_name = f"{os.path.splitext(os.path.basename(image_path))[0]}_ML_PREDICTION.png"
     output_png = os.path.join("PNG_results", out_name)
@@ -74,12 +52,7 @@ def predict_single_document(image_path):
 
     return verdict, confidence, pred_proba, detector
 
-# ============================================================
-# MAIN EXECUTION
-# ============================================================
-
 if __name__ == "__main__":
-
     print("\n========================================================")
     print("      FINAL FORGED DOCUMENT ML PREDICTION SYSTEM")
     print("========================================================")
@@ -87,10 +60,8 @@ if __name__ == "__main__":
     if not os.path.exists(NEW_IMAGE_PATH):
         raise FileNotFoundError(f"Input image not found: {NEW_IMAGE_PATH}")
 
-    verdict, confidence, probabilities, detector = predict_single_document(
-        NEW_IMAGE_PATH
-    )
-
+    verdict, confidence, probabilities, _ = predict_single_document(NEW_IMAGE_PATH)
+    
     print(f"\nDocument: {os.path.basename(NEW_IMAGE_PATH)}")
     print(f"Final Verdict : {verdict}")
     print(f"Confidence    : {confidence:.2f}%")

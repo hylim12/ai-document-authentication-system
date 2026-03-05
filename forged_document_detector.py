@@ -933,20 +933,41 @@ def analyze_single_document(document_path, char_sensitivity=2.0, bg_sensitivity=
 
     return detector
 
-def generate_datasets(input_dir="input_docs"):
+def extract_country_code(document_name):
+    """Derive a country code prefix from filename (e.g., alb_id_00.jpg -> ALB)."""
+    base = os.path.basename(document_name)
+    code = base.split("_")[0].strip().upper()
+    if not code:
+        return "UNK"
+    return "".join(ch for ch in code if ch.isalnum())[:3] or "UNK"
+
+
+def generate_datasets(input_dirs=None):
+    """Generate training/test CSV from one or more folders of passport/ID images."""
     out_folder = ensure_output_folder()
     
-    print("\n[INFO] Initializing shared PaddleOCR Engine...")
-    shared_engine = PaddleOCR(use_angle_cls=True, lang='en', use_gpu=False, show_log=False)
+    if input_dirs is None:
+            input_dirs = ["input_docs", "more_docs"]
+    elif isinstance(input_dirs, str):
+            input_dirs = [input_dirs]
 
-    image_paths = (
-        glob.glob(os.path.join(input_dir, '*.jpg')) +
-        glob.glob(os.path.join(input_dir, '*.png')) +
-        glob.glob(os.path.join(input_dir, '*.jpeg'))
-    )
-    
+    shared_engine = None
+    if PaddleOCR is not None:
+            print("\n[INFO] Initializing shared PaddleOCR Engine...")
+            shared_engine = PaddleOCR(use_angle_cls=True, lang='en', use_gpu=False, show_log=False)
+    else:
+            print("\n[WARNING] PaddleOCR not installed. Running feature extraction without OCR semantics.")
+
+    image_paths = []
+    for input_dir in input_dirs:
+            image_paths.extend(glob.glob(os.path.join(input_dir, '*.jpg')))
+            image_paths.extend(glob.glob(os.path.join(input_dir, '*.png')))
+            image_paths.extend(glob.glob(os.path.join(input_dir, '*.jpeg')))
+
+    image_paths = sorted(set(image_paths))
+
     if not image_paths:
-        print(f"[FATAL ERROR] No images found in '{input_dir}'.")
+        print(f"[FATAL ERROR] No images found in: {input_dirs}")
         return
 
     training_data = [] 
@@ -959,7 +980,8 @@ def generate_datasets(input_dir="input_docs"):
         'failed': 0,
         'actual_genuine': 0,
         'actual_forged': 0,
-        'detected_as_forged': 0
+        'detected_as_forged': 0,
+        'country_counts': defaultdict(int)
     }
 
     print(f"=========================================================")
@@ -971,15 +993,14 @@ def generate_datasets(input_dir="input_docs"):
         doc_root = os.path.splitext(doc_name)[0] 
         is_forged = 'fake' in doc_name.lower()
         label = 1 if is_forged else 0
+        country_code = extract_country_code(doc_name)
+        summary['country_counts'][country_code] += 1
 
         if is_forged:
             summary['actual_forged'] += 1
         else:
             summary['actual_genuine'] += 1
 
-
-        print(f"[{i+1}/{len(image_paths)}] Analyzing: {doc_name}")
-        
         try:
             detector = DocumentForgeryDetector(path, ocr_engine=shared_engine)
             detector.is_training_doc = True
@@ -993,7 +1014,7 @@ def generate_datasets(input_dir="input_docs"):
                 summary['detected_as_forged'] += 1
 
             # Prepare features
-            data_row = {'Document_ID': doc_name, 'Label': label}
+            data_row = {'Document_ID': doc_name, 'Label': label, 'Country_Code': country_code}
             data_row.update(detector.forgery_features)
             
             training_data.append(data_row)
@@ -1007,8 +1028,10 @@ def generate_datasets(input_dir="input_docs"):
             continue
 
     # Write CSVs
-    if training_data: write_csv(training_data, "ml_training_data.csv")
-    if test_data: write_csv(test_data, "ml_test_data.csv")
+    if training_data:
+        write_csv(training_data, "ml_training_data.csv")
+    if test_data:
+        write_csv(test_data, "ml_test_data.csv")
 
     # PRINT SUMMARY TABLE 
     print("\n" + "="*50)
@@ -1021,6 +1044,7 @@ def generate_datasets(input_dir="input_docs"):
     print(f" Ground Truth (Genuine)     : {summary['actual_genuine']}")
     print(f" Ground Truth (Forged)      : {summary['actual_forged']}")
     print(f" AI Flagged as Suspicious   : {summary['detected_as_forged']}")
+    print(f" Countries Included         : {dict(summary['country_counts'])}")
     print("-" * 50)
     print(f" Files Saved to             : {out_folder}/")
     print(f" CSVs Generated             : ml_training_data.csv, ml_test_data.csv")
@@ -1053,5 +1077,5 @@ if __name__ == "__main__":
 
     cleanup_results_folder()
     # Generate ml_training_data.csv
-    generate_datasets()
+    generate_datasets(["input_docs", "more_docs"])
     # Run this to generate a single document analysis
