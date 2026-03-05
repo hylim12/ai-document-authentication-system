@@ -701,7 +701,7 @@ class DocumentForgeryDetector:
         return self.forgery_features
     
 
-    def process_document(self, char_sensitivity=2.0, bg_sensitivity=3.0, ocr_sensitivity=2.5):
+    def process_document(self, char_sensitivity=2.0, bg_sensitivity=3.0, ocr_sensitivity=2.5, auto_save_png=True):
         """Orchestrates the full detection pipeline with mandatory sequence."""
         try:
             # 1. Start with OCR and Image Preprocessing
@@ -727,6 +727,10 @@ class DocumentForgeryDetector:
             # 5. Generate final ML features and final report strings
             self.generate_training_features()
             self.generate_report() # This pre-calculates the verdict
+
+            # 6. Save PNG visualization for every processed file
+            if auto_save_png:
+                self.visualize_results(save_path=default_png_output_path(self.image_path))
 
         except Exception as e:
             self.log.append(f"[FATAL PIPELINE ERROR] {e}")
@@ -901,13 +905,17 @@ def ensure_output_folder():
     os.makedirs(folder, exist_ok=True)
     return folder
 
+def default_png_output_path(image_path):
+    """Build default PNG output path for a processed document."""
+    out_folder = ensure_output_folder()
+    doc_name = os.path.splitext(os.path.basename(image_path))[0]
+    return os.path.join(out_folder, f"{doc_name}_analysis.png")
+
 def analyze_single_document(document_path, char_sensitivity=2.0, bg_sensitivity=3.0, ocr_sensitivity=2.5):
     """
     Main function to orchestrate the analysis for a single document.
     """
-    out_folder = ensure_output_folder()
-    doc_name = os.path.splitext(os.path.basename(document_path))[0]
-    output_png = os.path.join(out_folder, f"{doc_name}_enhanced_analysis.PNG")
+    output_png = default_png_output_path(document_path)
 
     print("\n================================================================================")
     print("      STARTING DOCUMENT FORGERY ANALYSIS (AI-ENHANCED)")
@@ -919,13 +927,14 @@ def analyze_single_document(document_path, char_sensitivity=2.0, bg_sensitivity=
         print(f"\nFATAL ERROR loading document: {e}"); return None
 
     detector.process_document(
-        char_sensitivity=char_sensitivity, bg_sensitivity=bg_sensitivity, ocr_sensitivity=ocr_sensitivity
+        char_sensitivity=char_sensitivity,
+        bg_sensitivity=bg_sensitivity,
+        ocr_sensitivity=ocr_sensitivity,
+        auto_save_png=True,
     )
 
     print(detector.generate_report())
 
-    print("\n[INFO] Generating visualization...")
-    detector.visualize_results(save_path=output_png) 
     print(f"[INFO] Saved visualization to: {output_png}")
     print("================================================================================")
     print("                Analysis Complete!")
@@ -943,26 +952,26 @@ def extract_country_code(document_name):
 
 
 def generate_datasets(input_dirs=None):
-    """Generate training/test CSV from one or more folders of passport/ID images."""
+    """Generate training/test CSV from training folders only."""
     out_folder = ensure_output_folder()
     
     if input_dirs is None:
-            input_dirs = ["input_docs", "more_docs"]
+        input_dirs = ["input_docs"]
     elif isinstance(input_dirs, str):
-            input_dirs = [input_dirs]
+        input_dirs = [input_dirs]
 
     shared_engine = None
     if PaddleOCR is not None:
-            print("\n[INFO] Initializing shared PaddleOCR Engine...")
-            shared_engine = PaddleOCR(use_angle_cls=True, lang='en', use_gpu=False, show_log=False)
+        print("\n[INFO] Initializing shared PaddleOCR Engine...")
+        shared_engine = PaddleOCR(use_angle_cls=True, lang='en', use_gpu=False, show_log=False)
     else:
-            print("\n[WARNING] PaddleOCR not installed. Running feature extraction without OCR semantics.")
+        print("\n[WARNING] PaddleOCR not installed. Running feature extraction without OCR semantics.")
 
     image_paths = []
     for input_dir in input_dirs:
-            image_paths.extend(glob.glob(os.path.join(input_dir, '*.jpg')))
-            image_paths.extend(glob.glob(os.path.join(input_dir, '*.png')))
-            image_paths.extend(glob.glob(os.path.join(input_dir, '*.jpeg')))
+        image_paths.extend(glob.glob(os.path.join(input_dir, '*.jpg')))
+        image_paths.extend(glob.glob(os.path.join(input_dir, '*.png')))
+        image_paths.extend(glob.glob(os.path.join(input_dir, '*.jpeg')))
 
     image_paths = sorted(set(image_paths))
 
@@ -989,8 +998,7 @@ def generate_datasets(input_dirs=None):
     print(f"=========================================================")
 
     for i, path in enumerate(image_paths):
-        doc_name = os.path.basename(path)
-        doc_root = os.path.splitext(doc_name)[0] 
+        doc_name = os.path.basename(path) 
         is_forged = 'fake' in doc_name.lower()
         label = 1 if is_forged else 0
         country_code = extract_country_code(doc_name)
@@ -1033,7 +1041,7 @@ def generate_datasets(input_dirs=None):
     if test_data:
         write_csv(test_data, "ml_test_data.csv")
 
-    # PRINT SUMMARY TABLE 
+    # Print Summary Table
     print("\n" + "="*50)
     print("         PROCESSING SUMMARY REPORT")
     print("="*50)
@@ -1077,5 +1085,5 @@ if __name__ == "__main__":
 
     cleanup_results_folder()
     # Generate ml_training_data.csv
-    generate_datasets(["input_docs", "more_docs"])
+    generate_datasets(["input_docs"])
     # Run this to generate a single document analysis
