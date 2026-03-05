@@ -999,6 +999,7 @@ def generate_datasets(input_dirs=None):
 
     for i, path in enumerate(image_paths):
         doc_name = os.path.basename(path) 
+        doc_root = os.path.splitext(doc_name)[0]
         is_forged = 'fake' in doc_name.lower()
         label = 1 if is_forged else 0
         country_code = extract_country_code(doc_name)
@@ -1013,11 +1014,10 @@ def generate_datasets(input_dirs=None):
             detector = DocumentForgeryDetector(path, ocr_engine=shared_engine)
             detector.is_training_doc = True
             detector.is_forged_gt = is_forged
-            detector.process_document()
-            
-            output_png = os.path.join(out_folder, f"{doc_root}_analysis.png")
-            detector.visualize_results(save_path=output_png)
-            
+
+            detector.process_document(auto_save_png=True)
+            print(f"   [OK] Saved outputs: PNG_results/{doc_root}_analysis.png and results/OCR_JSON_results/{doc_root}.json")
+
             if "FORGED" in detector.final_verdict.upper():
                 summary['detected_as_forged'] += 1
 
@@ -1083,7 +1083,8 @@ def cleanup_results_folder(folder_path="PNG_results"):
 
 if __name__ == "__main__":
 
-    cleanup_results_folder()
+    cleanup_results_folder("PNG_results")
+    cleanup_results_folder("results")
     # Generate ml_training_data.csv
     generate_datasets(["input_docs"])
     # Run this to generate a single document analysis
