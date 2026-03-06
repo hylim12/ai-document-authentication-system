@@ -872,7 +872,7 @@ class DocumentForgeryDetector:
         """
 
         # Folder creation
-        json_dir = os.path.join("results", "OCR_JSON_results")
+        json_dir = os.path.join("final_results\\results", "OCR_JSON_results")
         os.makedirs(json_dir, exist_ok=True)
 
         image_name = os.path.basename(image_path)
@@ -901,7 +901,7 @@ class DocumentForgeryDetector:
 
 def ensure_output_folder():
     """Creates the output folder if it doesn't exist."""
-    folder = "PNG_results"
+    folder = "final_results/PNG_results"
     os.makedirs(folder, exist_ok=True)
     return folder
 
@@ -1001,7 +1001,7 @@ def _build_feature_rows(image_paths, shared_engine=None, dataset_name="dataset")
             detector.is_forged_gt = is_forged
 
             detector.process_document(auto_save_png=True)
-            print(f"   [OK] Saved outputs: PNG_results/{doc_root}_analysis.png and results/OCR_JSON_results/{doc_root}.json")
+            print(f"   [OK] Saved outputs: final_results/PNG_results/{doc_root}_analysis.png and final_results/results/OCR_JSON_results/{doc_root}.json")
 
             if "FORGED" in detector.final_verdict.upper():
                 summary['detected_as_forged'] += 1
@@ -1034,19 +1034,42 @@ def _print_summary(summary, out_folder, csv_name):
     print(f" CSV Generated              : {csv_name}")
     print("="*50 + "\n")
 
+def _empty_summary(dataset_name):
+    return {
+        'dataset': dataset_name,
+        'total': 0,
+        'success': 0,
+        'failed': 0,
+        'actual_genuine': 0,
+        'actual_forged': 0,
+        'detected_as_forged': 0,
+        'country_counts': defaultdict(int),
+    }
+
+
+def _print_overall_summary(summaries):
+    print("\n" + "="*72)
+    print("                 OVERALL DATASET PROCESSING SUMMARY")
+    print("="*72)
+    for summary, csv_name in summaries:
+        print(f"[{summary['dataset']}] -> {csv_name}")
+        print(f"  Total: {summary['total']} | Success: {summary['success']} | Failures: {summary['failed']}")
+        print(f"  Genuine: {summary['actual_genuine']} | Forged: {summary['actual_forged']} | Flagged: {summary['detected_as_forged']}")
+        print(f"  Countries: {dict(summary['country_counts'])}")
+        print("-"*72)
 def generate_datasets(training_dirs=None, validation_dirs=None, test_dirs=None):
     """Generate train/validation/test CSVs from separate folders.
 
     Defaults:
-    - training_dirs: ["datasets/training_set"]
-    - validation_dirs: ["datasets/validation_set"]
-    - test_dirs: ["datasets/testing_set"]
+    - training_dirs: ["training_set"]
+    - validation_dirs: ["validation_set"]
+    - test_dirs: ["testing_set"]
     """
     out_folder = ensure_output_folder()
 
-    training_dirs = _normalize_dirs(training_dirs, "datasets/training_set")
-    validation_dirs = _normalize_dirs(validation_dirs, "datasets/validation_set")
-    test_dirs = _normalize_dirs(test_dirs, "datasets/testing_set")
+    training_dirs = _normalize_dirs(training_dirs, "training_set")
+    validation_dirs = _normalize_dirs(validation_dirs, "validation_set")
+    test_dirs = _normalize_dirs(test_dirs, "testing_set")
 
     shared_engine = None
     if PaddleOCR is not None:
@@ -1067,22 +1090,35 @@ def generate_datasets(training_dirs=None, validation_dirs=None, test_dirs=None):
     if not test_paths:
         print(f"[WARNING] No images found for testing in: {test_dirs}")
 
+    all_summaries = []
+
     training_data, train_summary = _build_feature_rows(training_paths, shared_engine, dataset_name="Training Set")
     if training_data:
         write_csv(training_data, "ml_training_data.csv")
     _print_summary(train_summary, out_folder, "ml_training_data.csv")
+    all_summaries.append((train_summary, "ml_training_data.csv"))
 
     if validation_paths:
         validation_data, validation_summary = _build_feature_rows(validation_paths, shared_engine, dataset_name="Validation Set")
         if validation_data:
             write_csv(validation_data, "ml_validation_data.csv")
         _print_summary(validation_summary, out_folder, "ml_validation_data.csv")
+    else:
+        validation_summary = _empty_summary("Validation Set")
+        _print_summary(validation_summary, out_folder, "ml_validation_data.csv")
+    all_summaries.append((validation_summary, "ml_validation_data.csv"))
 
     if test_paths:
         test_data, test_summary = _build_feature_rows(test_paths, shared_engine, dataset_name="Test Set")
         if test_data:
             write_csv(test_data, "ml_test_data.csv")
         _print_summary(test_summary, out_folder, "ml_test_data.csv")
+    else:
+        test_summary = _empty_summary("Test Set")
+        _print_summary(test_summary, out_folder, "ml_test_data.csv")
+    all_summaries.append((test_summary, "ml_test_data.csv"))
+
+    _print_overall_summary(all_summaries)
 
 def write_csv(data_list, filename):
     """Helper to write dictionary lists to CSV with consistent headers."""
@@ -1094,7 +1130,7 @@ def write_csv(data_list, filename):
         writer.writeheader()
         writer.writerows(data_list)
 
-def cleanup_results_folder(folder_path="PNG_results"):
+def cleanup_results_folder(folder_path="final_results/PNG_results"):
     """Deletes all existing files in the results folder before a new batch run."""
     if os.path.exists(folder_path):
         for filename in os.listdir(folder_path):
@@ -1108,8 +1144,8 @@ def cleanup_results_folder(folder_path="PNG_results"):
 
 if __name__ == "__main__":
 
-    cleanup_results_folder("PNG_results")
-    cleanup_results_folder("results")
+    cleanup_results_folder("final_results/PNG_results")
+    cleanup_results_folder("final_results/results")
     # Generate split CSVs from distinct folders:
     # - training_set   -> ml_training_data.csv
     # - validation_set -> ml_validation_data.csv
