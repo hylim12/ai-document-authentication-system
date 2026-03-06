@@ -1,3 +1,4 @@
+=== VER 3 ===
 Project Title: AI-Powered Document Authentication for AML Systems
 Developer: Eldeena Lim Huey Yinn
 Supervisor: Prof. Ts. Dr. Tee Connie
