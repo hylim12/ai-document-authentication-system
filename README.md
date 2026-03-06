@@ -42,11 +42,14 @@ How to Run
 - Environment Setup: Ensure Python 3.x is installed along with dependencies:
 pip install opencv-python paddleocr paddlepaddle scikit-learn pandas matplotlib
 
-- Generate Dataset (multi-country): Run forged_document_detector.py to process training images from `input_docs` only.
+- Generate Dataset (multi-country): Run forged_document_detector.py to process two explicit folders:
+  - Training set source: `training_set` -> `ml_training_data.csv`
+  - Validation set source: `validation_set` -> `ml_validation_data.csv`
+  - Test set source: `testing_set` -> `ml_test_data.csv`
   - Filenames should follow <country>_...jpg format (e.g., alb_id_00.jpg, lva_passport_01.jpg, svk_id_02.jpg).
   - The generated CSV now includes Country_Code so the model can generalize across nationalities.
 
-- Unseen Evaluation Data: Keep `more_docs` as unseen samples for `predict_one.py` (single-image inference), not for model training.
+- Unseen Evaluation Data: Keep `testing_set` separate from model training and validation and use it for final `ml_test_data.csv` evaluation and `predict_one.py` (single-image inference).
 - Train Model: Run `python ml_model_training.py` to train a country-aware RandomForest model and save:
   - `trained_models/forged_document_rf_model.pkl`
   - `trained_models/feature_preprocessor.pkl`
