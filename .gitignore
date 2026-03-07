@@ -1,3 +1,13 @@
-*.csv
-results/
-*.json
+# datasets
+code/datasets/
+
+# results
+final_results/
+
+# models
+*.pkl
+*.joblib
+
+# python
+__pycache__/
+.ipynb_checkpoints
