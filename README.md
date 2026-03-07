@@ -49,6 +49,24 @@ pip install opencv-python paddleocr paddlepaddle scikit-learn pandas matplotlib
   - Filenames should follow <country>_...jpg format (e.g., alb_id_00.jpg, lva_passport_01.jpg, svk_id_02.jpg).
   - The generated CSV now includes Country_Code so the model can generalize across nationalities.
 
+- Faster development loop (recommended during debugging):
+  - Quick preset: `python forged_document_detector.py --quick`
+    - Limits each split to 20 docs
+    - Skips PNG visualization writes
+    - Uses smaller resize width (1000 px)
+  - Custom fast run examples:
+    - `python forged_document_detector.py --max-docs-per-split 10 --skip-png --resize-width 900`
+    - `python forged_document_detector.py --training-dirs datasets/training_set --validation-dirs datasets/validation_set --test-dirs datasets/testing_set --max-docs-per-split 30`
+  - Why this is faster:
+    - OCR + contouring dominate runtime; fewer images + smaller resolution significantly reduce processing time.
+    - PNG rendering/saving is useful for audits but expensive for iterative debugging.
+
+- Dataset optimization tips for speed + model quality:
+  - Keep a tiny `debug subset` per split (e.g., 10–30 images) with both genuine and forged examples.
+  - Balance classes per country when possible (avoid one country or one class dominating).
+  - Remove near-duplicate images from training to reduce unnecessary processing time and overfitting risk.
+  - Keep test set untouched while iterating; only shrink training/validation during rapid experimentation.
+
 - Unseen Evaluation Data: Keep `testing_set` separate from model training and validation and use it for final `ml_test_data.csv` evaluation and `predict_one.py` (single-image inference).
 - Train Model: Run `python ml_model_training.py` to train a country-aware RandomForest model and save:
   - `trained_models/forged_document_rf_model.pkl`
