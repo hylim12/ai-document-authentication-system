@@ -5,6 +5,7 @@ datasets/
 final_results/
 
 # models
+*.csv
 *.pkl
 *.joblib
 
