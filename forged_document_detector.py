@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 from collections import defaultdict
 import warnings
 import os
+import argparse
 from PIL import Image
 import re 
 import datetime 
@@ -31,7 +32,7 @@ warnings.filterwarnings('ignore')
 
 class DocumentForgeryDetector:
 
-    def __init__(self, image_path, ocr_engine=None):
+    def __init__(self, image_path, ocr_engine=None, target_width=1500):
         """Initializes forensic storage and standardizes input resolution."""
         self.image_path = image_path
         self.ocr_engine = ocr_engine
@@ -42,7 +43,7 @@ class DocumentForgeryDetector:
         try:
             # Standardize input for consistent feature extraction
             pil_image = Image.open(image_path).convert("RGB")
-            target_width = 1500
+            target_width = max(600, int(target_width))
             w_percent = target_width / float(pil_image.size[0])
             target_height = int(pil_image.size[1] * w_percent)
 
@@ -957,15 +958,18 @@ def _normalize_dirs(dirs, default_dir):
         return [dirs]
     return list(dirs)
 
-def _collect_image_paths(input_dirs):
+def _collect_image_paths(input_dirs, max_docs=None):
     image_paths = []
     for input_dir in input_dirs:
         image_paths.extend(glob.glob(os.path.join(input_dir, '*.jpg')))
         image_paths.extend(glob.glob(os.path.join(input_dir, '*.png')))
         image_paths.extend(glob.glob(os.path.join(input_dir, '*.jpeg')))
-    return sorted(set(image_paths))  
+    image_paths = sorted(set(image_paths))
+    if max_docs is not None:
+        return image_paths[:max(0, int(max_docs))]
+    return image_paths  
 
-def _build_feature_rows(image_paths, shared_engine=None, dataset_name="dataset"):
+def _build_feature_rows(image_paths, shared_engine=None, dataset_name="dataset", auto_save_png=True, target_width=1500):
     rows = []
     summary = {
         'dataset': dataset_name,
@@ -996,13 +1000,15 @@ def _build_feature_rows(image_paths, shared_engine=None, dataset_name="dataset")
             summary['actual_genuine'] += 1
 
         try:
-            detector = DocumentForgeryDetector(path, ocr_engine=shared_engine)
+            detector = DocumentForgeryDetector(path, ocr_engine=shared_engine, target_width=target_width)
             detector.is_training_doc = True
             detector.is_forged_gt = is_forged
 
-            detector.process_document(auto_save_png=True)
-            print(f"   [OK] Saved outputs: final_results/PNG_results/{doc_root}_analysis.png and final_results/results/OCR_JSON_results/{doc_root}.json")
-
+            detector.process_document(auto_save_png=auto_save_png)
+            if auto_save_png:
+                print(f"   [OK] Saved outputs: final_results/PNG_results/{doc_root}_analysis.png and final_results/results/OCR_JSON_results/{doc_root}.json")
+            else:
+                print(f"   [OK] Saved outputs: final_results/results/OCR_JSON_results/{doc_root}.json")
             if "FORGED" in detector.final_verdict.upper():
                 summary['detected_as_forged'] += 1
 
@@ -1057,7 +1063,7 @@ def _print_overall_summary(summaries):
         print(f"  Genuine: {summary['actual_genuine']} | Forged: {summary['actual_forged']} | Flagged: {summary['detected_as_forged']}")
         print(f"  Countries: {dict(summary['country_counts'])}")
         print("-"*72)
-def generate_datasets(training_dirs=None, validation_dirs=None, test_dirs=None):
+def generate_datasets(training_dirs=None, validation_dirs=None, test_dirs=None, max_docs_per_split=None, auto_save_png=True, target_width=1500):
     """Generate train/validation/test CSVs from separate folders.
 
     Defaults:
@@ -1078,9 +1084,9 @@ def generate_datasets(training_dirs=None, validation_dirs=None, test_dirs=None):
     else:
         print("\n[WARNING] PaddleOCR not installed. Running feature extraction without OCR semantics.")
 
-    training_paths = _collect_image_paths(training_dirs)
-    validation_paths = _collect_image_paths(validation_dirs)
-    test_paths = _collect_image_paths(test_dirs)
+    training_paths = _collect_image_paths(training_dirs, max_docs=max_docs_per_split)
+    validation_paths = _collect_image_paths(validation_dirs, max_docs=max_docs_per_split)
+    test_paths = _collect_image_paths(test_dirs, max_docs=max_docs_per_split)
 
     if not training_paths:
         print(f"[FATAL ERROR] No images found for training in: {training_dirs}")
@@ -1092,14 +1098,26 @@ def generate_datasets(training_dirs=None, validation_dirs=None, test_dirs=None):
 
     all_summaries = []
 
-    training_data, train_summary = _build_feature_rows(training_paths, shared_engine, dataset_name="Training Set")
+    training_data, train_summary = _build_feature_rows(
+        training_paths,
+        shared_engine,
+        dataset_name="Training Set",
+        auto_save_png=auto_save_png,
+        target_width=target_width,
+    )
     if training_data:
         write_csv(training_data, "ml_training_data.csv")
     _print_summary(train_summary, out_folder, "ml_training_data.csv")
     all_summaries.append((train_summary, "ml_training_data.csv"))
 
     if validation_paths:
-        validation_data, validation_summary = _build_feature_rows(validation_paths, shared_engine, dataset_name="Validation Set")
+        validation_data, validation_summary = _build_feature_rows(
+            validation_paths,
+            shared_engine,
+            dataset_name="Validation Set",
+            auto_save_png=auto_save_png,
+            target_width=target_width,
+        )
         if validation_data:
             write_csv(validation_data, "ml_validation_data.csv")
         _print_summary(validation_summary, out_folder, "ml_validation_data.csv")
@@ -1109,7 +1127,13 @@ def generate_datasets(training_dirs=None, validation_dirs=None, test_dirs=None):
     all_summaries.append((validation_summary, "ml_validation_data.csv"))
 
     if test_paths:
-        test_data, test_summary = _build_feature_rows(test_paths, shared_engine, dataset_name="Test Set")
+        test_data, test_summary = _build_feature_rows(
+            test_paths,
+            shared_engine,
+            dataset_name="Test Set",
+            auto_save_png=auto_save_png,
+            target_width=target_width,
+        )
         if test_data:
             write_csv(test_data, "ml_test_data.csv")
         _print_summary(test_summary, out_folder, "ml_test_data.csv")
@@ -1144,15 +1168,39 @@ def cleanup_results_folder(folder_path="final_results/PNG_results"):
 
 if __name__ == "__main__":
 
-    cleanup_results_folder("final_results/PNG_results")
+    parser = argparse.ArgumentParser(description="Generate document-forgery feature datasets.")
+    parser.add_argument("--training-dirs", nargs="+", default=["datasets/training_set"])
+    parser.add_argument("--validation-dirs", nargs="+", default=["datasets/validation_set"])
+    parser.add_argument("--test-dirs", nargs="+", default=["datasets/testing_set"])
+    parser.add_argument("--max-docs-per-split", type=int, default=None,
+                        help="Limit each split to the first N docs for faster debug loops.")
+    parser.add_argument("--skip-png", action="store_true",
+                        help="Skip saving analysis PNGs to speed up batch runs.")
+    parser.add_argument("--resize-width", type=int, default=1500,
+                        help="Target width for preprocessing; lower values are faster.")
+    parser.add_argument("--quick", action="store_true",
+                        help="Fast debug preset: max 20 docs/split, skip PNGs, resize width 1000.")
+    args = parser.parse_args()
+
+    max_docs = args.max_docs_per_split
+    skip_png = args.skip_png
+    resize_width = args.resize_width
+
+    if args.quick:
+        max_docs = 20 if max_docs is None else min(max_docs, 20)
+        skip_png = True
+        resize_width = min(resize_width, 1000)
+        print("[INFO] Quick mode enabled: limiting docs, skipping PNGs, and using smaller resize width.")
+
+    if not skip_png:
+        cleanup_results_folder("final_results/PNG_results")
     cleanup_results_folder("final_results/results")
-    # Generate split CSVs from distinct folders:
-    # - training_set   -> ml_training_data.csv
-    # - validation_set -> ml_validation_data.csv
-    # - testing_set    -> ml_test_data.csv
     generate_datasets(
-        training_dirs=["datasets/training_set"],
-        validation_dirs=["datasets/validation_set"],
-        test_dirs=["datasets/testing_set"],
+        training_dirs=args.training_dirs,
+        validation_dirs=args.validation_dirs,
+        test_dirs=args.test_dirs,
+        max_docs_per_split=max_docs,
+        auto_save_png=not skip_png,
+        target_width=resize_width,
     )
     # Run this to generate a single document analysis
