@@ -582,6 +582,18 @@ class DocumentForgeryDetector:
         }
 
         # Calculate Recall Metrics: Evaluate extraction completeness for forensic reporting.
+        self._update_ner_metrics()
+
+        # Log findings
+        print("\n[NER FIELDS]")
+        for k in sorted(self.ner_entities):
+            print(f"  {k:18s}: {self.ner_entities[k]['text']}")
+        if self.missing_ner_fields:
+            print("  Missing fields:", ", ".join(self.missing_ner_fields))
+        print(f"  NER Recall: {self.ner_metrics['ner_recall']:.2f}")
+
+    def _update_ner_metrics(self):
+        """Recompute NER completeness metrics from current ner_entities."""
         EXPECTED_FIELDS = {
             'SURNAME',
             'GIVEN NAME',
@@ -606,13 +618,43 @@ class DocumentForgeryDetector:
         }
         self.missing_ner_fields = self.ner_metrics["missing_fields"]
 
-        # Log findings
-        print("\n[NER FIELDS]")
-        for k in sorted(self.ner_entities):
-            print(f"  {k:18s}: {self.ner_entities[k]['text']}")
-        if self.missing_ner_fields:
-            print("  Missing fields:", ", ".join(self.missing_ner_fields))
-        print(f"  NER Recall: {self.ner_metrics['ner_recall']:.2f}")
+    def _ocr_json_output_path(self, image_path):
+        """Build OCR JSON path consistent with save_ocr_json output."""
+        json_dir = os.path.join("final_results\\results", "OCR_JSON_results")
+        image_name = os.path.basename(image_path)
+        json_name = os.path.splitext(image_name)[0] + ".json"
+        return os.path.join(json_dir, json_name)
+
+    def run_llm_ner(self, ocr_json_path):
+        """Run LLM-based NER from OCR JSON; fallback to regex NER on any failure."""
+        print("[INFO] Running LLM-based NER extraction")
+        self.log.append("- Running LLM-based NER extraction.")
+        try:
+            from llm_ner_extractor import extract_passport_fields_llm
+            llm_entities = extract_passport_fields_llm(ocr_json_path)
+            if not llm_entities:
+                raise ValueError("LLM returned no entities")
+
+            normalized = {}
+            for field, payload in llm_entities.items():
+                bbox = payload.get("bbox")
+                if bbox is None:
+                    bbox = (0, 0, self.width, self.height)
+                normalized[field] = {
+                    "text": str(payload.get("text", "")).strip(),
+                    "bbox": bbox,
+                    "confidence": float(payload.get("confidence", 0.0)),
+                }
+
+            self.ner_entities = {k: v for k, v in normalized.items() if v["text"]}
+            self._update_ner_metrics()
+            print("[INFO] LLM NER detected fields:", ", ".join(sorted(self.ner_entities.keys())) or "None")
+            self.log.append(f"- LLM NER detected fields: {len(self.ner_entities)}")
+        except Exception as e:
+            print(f"[WARNING] LLM NER failed. Falling back to regex NER. Reason: {e}")
+            self.log.append(f"- LLM NER failed, fallback regex NER: {e}")
+            # keep existing regex-based extraction path for compatibility
+            self.identify_critical_entities_from_ocr()
 
 
     def perform_ocr(self):
@@ -810,9 +852,10 @@ class DocumentForgeryDetector:
             self.perform_ocr()
             self.preprocess_image() 
             
-            # 2. Identify Fields and Values
-            self.identify_critical_entities_from_ocr() 
-            self.save_ocr_json(self.image_path) 
+            # 2. Identify Fields and Values (regex baseline), then LLM-enhanced NER from OCR JSON
+            self.identify_critical_entities_from_ocr()
+            self.save_ocr_json(self.image_path)
+            self.run_llm_ner(self._ocr_json_output_path(self.image_path)) 
 
             # 3. Run physical and OCR box checks
             self.detect_ocr_box_anomalies(sensitivity=ocr_sensitivity)
