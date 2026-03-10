@@ -1107,7 +1107,7 @@ class DocumentForgeryDetector:
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4, ensure_ascii=False)
 
-        print(f"[INFO] OCR JSON saved → {json_path}")
+        print(f"\n\n[INFO] OCR JSON saved → {json_path}")
 
 
 def ensure_output_folder():
