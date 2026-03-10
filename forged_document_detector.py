@@ -85,6 +85,8 @@ class DocumentForgeryDetector:
         self.forgery_features = {}
         self.forgery_issues = []
         self.risk_score = 0.0
+        self.llm_ner_disabled_reason = None
+
 
 
     def preprocess_image(self):
@@ -627,10 +629,23 @@ class DocumentForgeryDetector:
 
     def run_llm_ner(self, ocr_json_path):
         """Run LLM-based NER from OCR JSON; fallback to regex NER on any failure."""
+        enable_llm = os.getenv("ENABLE_LLM_NER", "1").strip().lower() not in {"0", "false", "no"}
+        if not enable_llm:
+            self.log.append("- LLM NER disabled by ENABLE_LLM_NER environment setting.")
+            return
+
+        if self.llm_ner_disabled_reason:
+            self.log.append(f"- LLM NER skipped: {self.llm_ner_disabled_reason}")
+            return
+
         print("[INFO] Running LLM-based NER extraction")
         self.log.append("- Running LLM-based NER extraction.")
         try:
-            from llm_ner_extractor import extract_passport_fields_llm
+            from llm_ner_extractor import (
+                extract_passport_fields_llm,
+                LLMNERQuotaError,
+                LLMNERConfigError,
+            )
             llm_entities = extract_passport_fields_llm(ocr_json_path)
             if not llm_entities:
                 raise ValueError("LLM returned no entities")
@@ -650,11 +665,20 @@ class DocumentForgeryDetector:
             self._update_ner_metrics()
             print("[INFO] LLM NER detected fields:", ", ".join(sorted(self.ner_entities.keys())) or "None")
             self.log.append(f"- LLM NER detected fields: {len(self.ner_entities)}")
+        except LLMNERQuotaError as e:
+            self.llm_ner_disabled_reason = "quota exceeded"
+            print(f"[WARNING] LLM NER unavailable due to quota. Using regex NER only. Reason: {e}")
+            self.log.append(f"- LLM NER quota exceeded; regex fallback active: {e}")
+        except LLMNERConfigError as e:
+            self.llm_ner_disabled_reason = "missing API key"
+            print(f"[WARNING] LLM NER not configured. Using regex NER only. Reason: {e}")
+            self.log.append(f"- LLM NER configuration issue; regex fallback active: {e}")
         except Exception as e:
             print(f"[WARNING] LLM NER failed. Falling back to regex NER. Reason: {e}")
             self.log.append(f"- LLM NER failed, fallback regex NER: {e}")
-            # keep existing regex-based extraction path for compatibility
-            self.identify_critical_entities_from_ocr()
+            # regex baseline already executed in process_document; only recompute if empty
+            if not self.ner_entities:
+                self.identify_critical_entities_from_ocr()
 
 
     def perform_ocr(self):

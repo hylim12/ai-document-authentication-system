@@ -1,9 +1,47 @@
 """LLM-based NER extraction for passport/ID OCR JSON outputs."""
 
 import json
+import os
 from typing import Dict, List, Any
 
 from prompts.passport_ner_prompt import build_passport_ner_prompt
+
+
+
+class LLMNERQuotaError(RuntimeError):
+    """Raised when API quota/billing limits block LLM NER."""
+
+
+class LLMNERConfigError(RuntimeError):
+    """Raised when LLM NER is not correctly configured."""
+
+
+def _load_key_from_dotenv(dotenv_path: str = ".env") -> str:
+    """Best-effort local .env loader for OPENROUTER_API_KEY."""
+    if not os.path.exists(dotenv_path):
+        return ""
+    try:
+        with open(dotenv_path, "r", encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                if k.strip() == "OPENROUTER_API_KEY":
+                    return v.strip().strip('"').strip("'")
+    except Exception:
+        return ""
+    return ""
+
+
+def _resolve_llm_config(default_model: str) -> tuple[str, str, str]:
+    """Resolve API key, base URL and model, preferring OpenRouter settings."""
+    api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+    if not api_key:
+        api_key = _load_key_from_dotenv()
+    base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").strip()
+    model = os.getenv("OPENROUTER_MODEL", default_model).strip() or default_model
+    return api_key, base_url, model
 
 
 def load_ocr_json(json_path: str) -> List[Dict[str, Any]]:
@@ -40,23 +78,43 @@ def _safe_parse_json(content: str) -> Dict[str, Any]:
         raise
 
 
-def extract_passport_fields_llm(ocr_json_path: str, model: str = "gpt-4o-mini") -> Dict[str, Dict[str, Any]]:
-    """Extract dynamic passport/ID entities from OCR JSON using OpenAI API."""
+def extract_passport_fields_llm(ocr_json_path: str, model: str = "openai/gpt-4o-mini") -> Dict[str, Dict[str, Any]]:
+    """Extract dynamic passport/ID entities from OCR JSON using OpenRouter (OpenAI SDK)."""
+    api_key, base_url, resolved_model = _resolve_llm_config(model)
+    if not api_key:
+        raise LLMNERConfigError(
+            "OPENROUTER_API_KEY is not set (or .env missing). Configure it to enable LLM NER."
+        )
+
     # Keep OpenAI import local so the rest of the project can run without SDK installed.
-    from openai import OpenAI
+    try:
+        from openai import OpenAI
+    except ImportError as e:
+        raise LLMNERConfigError(
+            "openai package is not installed. Install it to enable LLM NER."
+        ) from e
 
     ocr_rows = load_ocr_json(ocr_json_path)
     prompt = build_passport_ner_prompt(ocr_rows)
 
-    client = OpenAI()
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": "You are a strict JSON information extraction engine."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0,
-    )
+    client = OpenAI(api_key=api_key, base_url=base_url)
+    try:
+        response = client.chat.completions.create(
+            model=resolved_model,
+            messages=[
+                {"role": "system", "content": "You are a strict JSON information extraction engine."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0,
+        )
+    except Exception as e:
+        msg = str(e)
+        if "insufficient_quota" in msg or "Error code: 429" in msg or "quota" in msg.lower():
+            raise LLMNERQuotaError(
+                "LLM provider quota exceeded (429 insufficient_quota). "
+                "Check billing/plan, or continue with regex fallback."
+            ) from e
+        raise
 
     content = response.choices[0].message.content or "{}"
     payload = _safe_parse_json(content)
