@@ -442,7 +442,7 @@ class DocumentForgeryDetector:
         return self.suspicious_regions
 
 
-    def identify_critical_entities_from_ocr(self):
+    def identify_critical_entities_from_ocr(self, print_summary=True):
         """
         Extracts and validates structured information from OCR results using geometric proximity and pattern matching.
         """
@@ -586,13 +586,8 @@ class DocumentForgeryDetector:
         # Calculate Recall Metrics: Evaluate extraction completeness for forensic reporting.
         self._update_ner_metrics()
 
-        # Log findings
-        print("\n[NER FIELDS]")
-        for k in sorted(self.ner_entities):
-            print(f"  {k:18s}: {self.ner_entities[k]['text']}")
-        if self.missing_ner_fields:
-            print("  Missing fields:", ", ".join(self.missing_ner_fields))
-        print(f"  NER Recall: {self.ner_metrics['ner_recall']:.2f}")
+        if print_summary:
+            self.print_ner_fields_summary()
 
     def _update_ner_metrics(self):
         """Recompute NER completeness metrics from current ner_entities."""
@@ -626,6 +621,50 @@ class DocumentForgeryDetector:
         image_name = os.path.basename(image_path)
         json_name = os.path.splitext(image_name)[0] + ".json"
         return os.path.join(json_dir, json_name)
+
+    def _ner_json_output_path(self, image_path):
+        """Build NER JSON path for LLM/regex extracted entities."""
+        json_dir = os.path.join("final_results\\results", "NER_JSON_results")
+        image_name = os.path.basename(image_path)
+        json_name = os.path.splitext(image_name)[0] + ".json"
+        return os.path.join(json_dir, json_name)
+
+    def save_ner_json(self, image_path):
+        """Save extracted NER entities to dedicated JSON output folder."""
+        ner_json_path = self._ner_json_output_path(image_path)
+        os.makedirs(os.path.dirname(ner_json_path), exist_ok=True)
+
+        data = {
+            "image_name": os.path.basename(image_path),
+            "image_size": [self.width, self.height],
+            "ner_source": "LLM_OR_REGEX",
+            "ner_entities": [
+                {
+                    "field": field,
+                    "text": payload.get("text", ""),
+                    "bbox": list(payload.get("bbox", [])) if payload.get("bbox") else None,
+                    "confidence": float(payload.get("confidence", 0.0)),
+                }
+                for field, payload in sorted(self.ner_entities.items())
+            ],
+            "ner_metrics": getattr(self, "ner_metrics", {}),
+        }
+
+        with open(ner_json_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+
+        print(f"[INFO] NER JSON saved → {ner_json_path}")
+        self.log.append(f"- NER JSON saved: {ner_json_path}")
+        return ner_json_path
+
+    def print_ner_fields_summary(self):
+        """Print current NER entity summary to terminal."""
+        print("\n[NER FIELDS]")
+        for k in sorted(self.ner_entities):
+            print(f"  {k:18s}: {self.ner_entities[k]['text']}")
+        if self.missing_ner_fields:
+            print("  Missing fields:", ", ".join(self.missing_ner_fields))
+            print(f"  NER Recall: {self.ner_metrics.get('ner_recall', 0.0):.2f}")
 
     def run_llm_ner(self, ocr_json_path):
         """Run LLM-based NER from OCR JSON; fallback to regex NER on any failure."""
@@ -877,9 +916,11 @@ class DocumentForgeryDetector:
             self.preprocess_image() 
             
             # 2. Identify Fields and Values (regex baseline), then LLM-enhanced NER from OCR JSON
-            self.identify_critical_entities_from_ocr()
+            self.identify_critical_entities_from_ocr(print_summary=False)
             self.save_ocr_json(self.image_path)
-            self.run_llm_ner(self._ocr_json_output_path(self.image_path)) 
+            self.run_llm_ner(self._ocr_json_output_path(self.image_path))
+            self.save_ner_json(self.image_path)
+            self.print_ner_fields_summary()
 
             # 3. Run physical and OCR box checks
             self.detect_ocr_box_anomalies(sensitivity=ocr_sensitivity)
@@ -1175,9 +1216,9 @@ def _build_feature_rows(image_paths, shared_engine=None, dataset_name="dataset",
 
             detector.process_document(auto_save_png=auto_save_png)
             if auto_save_png:
-                print(f"   [OK] Saved outputs: final_results/PNG_results/{doc_root}_analysis.png and final_results/results/OCR_JSON_results/{doc_root}.json")
+                print(f"   [OK] Saved outputs: final_results/PNG_results/{doc_root}_analysis.png, final_results/results/OCR_JSON_results/{doc_root}.json and final_results/results/NER_JSON_results/{doc_root}.json")
             else:
-                print(f"   [OK] Saved outputs: final_results/results/OCR_JSON_results/{doc_root}.json")
+                print(f"   [OK] Saved outputs: final_results/results/OCR_JSON_results/{doc_root}.json and final_results/results/NER_JSON_results/{doc_root}.json")
             if "FORGED" in detector.final_verdict.upper():
                 summary['detected_as_forged'] += 1
 

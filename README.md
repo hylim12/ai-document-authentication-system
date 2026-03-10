@@ -78,7 +78,27 @@ pip install opencv-python paddleocr paddlepaddle scikit-learn pandas matplotlib
 
 - Output Artifacts per processed file:
   - OCR JSON: `results/OCR_JSON_results/<doc_name>.json`
+  - NER JSON: `results/NER_JSON_results/<doc_name>.json`
   - Visualization PNG: `PNG_results/<doc_name>_analysis.png`
+
+LLM-based NER Configuration (OpenRouter via OpenAI SDK)
+- The LLM NER module uses the OpenAI Python SDK and reads the API key from environment variable `OPENROUTER_API_KEY`.
+- Do NOT hardcode API keys in Python files and do NOT commit keys into the repository.
+
+Setup examples:
+- Linux/macOS (current shell):
+  - `export OPENROUTER_API_KEY="sk-or-..."`
+- Windows PowerShell:
+  - `$env:OPENROUTER_API_KEY="sk-or-..."`
+
+Optional controls:
+- Choose OpenRouter model (example):
+  - `export OPENROUTER_MODEL="openai/gpt-4o-mini"`
+- Override OpenRouter base URL (optional):
+  - `export OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"`
+- Disable LLM NER explicitly (force regex-only NER):
+  - `export ENABLE_LLM_NER=0`
+
 
 This prototype serves as a Proof of Concept (PoC).
 
