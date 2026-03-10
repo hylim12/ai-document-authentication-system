@@ -44,6 +44,40 @@ def _resolve_llm_config(default_model: str) -> tuple[str, str, str]:
     return api_key, base_url, model
 
 
+
+
+def _canonicalize_field_name(field: str) -> str:
+    """Normalize field names from LLM output to detector's internal canonical keys."""
+    norm = " ".join(str(field).upper().replace("_", " ").replace("-", " ").split())
+    aliases = {
+        "GIVEN NAME": "GIVEN NAME",
+        "GIVEN NAMES": "GIVEN NAME",
+        "GENDER": "SEX",
+        "DATE OF BIRTH": "DATE OF BIRTH",
+        "DATE OF ISSUE": "DATE OF ISSUE",
+        "DATE OF EXPIRY": "DATE OF EXPIRY",
+        "PLACE OF BIRTH": "PLACE OF BIRTH",
+        "ID CARD NUMBER": "ID CARD NO",
+        "ID NUMBER": "ID CARD NO",
+        "CARD NO": "ID CARD NO",
+        "PASSPORT NUMBER": "PASSPORT NO",
+        "PERSONAL NUMBER": "PERSONAL NO",
+        "MRZ LINE 1": "MRZ LINE 1",
+        "MRZ LINE 2": "MRZ LINE 2",
+        "FULL NAME": "FULL NAME",
+        "HEIGHT": "HEIGHT",
+        "SIGNATURE": "SIGNATURE",
+        "AUTHORITY": "AUTHORITY",
+        "NATIONALITY": "NATIONALITY",
+        "SURNAME": "SURNAME",
+        "SEX": "SEX",
+        "PASSPORT NO": "PASSPORT NO",
+        "ID CARD NO": "ID CARD NO",
+        "PERSONAL NO": "PERSONAL NO",
+    }
+    return aliases.get(norm, norm)
+
+
 def load_ocr_json(json_path: str) -> List[Dict[str, Any]]:
     """Load OCR JSON file and return normalized OCR rows for prompting."""
     with open(json_path, "r", encoding="utf-8") as f:
@@ -122,7 +156,7 @@ def extract_passport_fields_llm(ocr_json_path: str, model: str = "openai/gpt-4o-
 
     normalized_entities: Dict[str, Dict[str, Any]] = {}
     for item in entities:
-        field = str(item.get("field", "")).strip().upper()
+        field = _canonicalize_field_name(item.get("field", ""))
         text = str(item.get("text", "")).strip()
         if not field or not text:
             continue

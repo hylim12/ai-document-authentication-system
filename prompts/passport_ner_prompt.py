@@ -116,23 +116,23 @@ FIELDS TO EXTRACT (WHEN PRESENT)
 
 Extract fields if identifiable:
 
-SURNAME  
-GIVEN_NAME  
-FULL_NAME  
-PASSPORT_NO  
-ID_CARD_NO  
-PERSONAL_NO  
-NATIONALITY  
-PLACE_OF_BIRTH  
-DATE_OF_BIRTH  
-DATE_OF_ISSUE  
-DATE_OF_EXPIRY  
-SEX  
-HEIGHT  
-AUTHORITY  
-SIGNATURE  
-MRZ_LINE_1  
-MRZ_LINE_2  
+SURNAME
+GIVEN_NAME
+FULL_NAME
+PASSPORT_NO
+ID_CARD_NO
+PERSONAL_NO
+NATIONALITY
+PLACE_OF_BIRTH
+DATE_OF_BIRTH
+DATE_OF_ISSUE
+DATE_OF_EXPIRY
+SEX
+HEIGHT
+AUTHORITY
+SIGNATURE
+MRZ_LINE_1
+MRZ_LINE_2
 
 If multiple candidates exist, choose the most reliable value.
 
@@ -149,7 +149,7 @@ LV6309038LVA7409288M2611044
 
 Extract them as:
 
-MRZ_LINE_1  
+MRZ_LINE_1
 MRZ_LINE_2
 
 --------------------------------------------------
@@ -158,16 +158,16 @@ OUTPUT FORMAT (STRICT JSON)
 
 Return ONLY valid JSON.
 
-{
+{{
   "entities": [
-    {
+    {{
       "field": "<canonical_field_name>",
       "text": "<extracted_value>",
       "bbox": [x1, y1, x2, y2],
       "confidence": 0.0
-    }
+    }}
   ]
-}
+}}
 
 --------------------------------------------------
 RULES

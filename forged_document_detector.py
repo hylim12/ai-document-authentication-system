@@ -582,6 +582,7 @@ class DocumentForgeryDetector:
             }
             for k, v in entities.items()
         }
+        self.ner_source = "REGEX"
 
         # Calculate Recall Metrics: Evaluate extraction completeness for forensic reporting.
         self._update_ner_metrics()
@@ -591,27 +592,30 @@ class DocumentForgeryDetector:
 
     def _update_ner_metrics(self):
         """Recompute NER completeness metrics from current ner_entities."""
-        EXPECTED_FIELDS = {
-            'SURNAME',
-            'GIVEN NAME',
-            'DATE OF BIRTH',
-            'DATE OF ISSUE',
-            'DATE OF EXPIRY',
-            'SEX',
-            'ID CARD NO',
-            'PERSONAL NO',
-            'NATIONALITY',
-            'PLACE OF BIRTH',
-            'AUTHORITY'
+        expected_slots = {
+            'SURNAME': {'SURNAME'},
+            'GIVEN NAME': {'GIVEN NAME', 'FULL NAME'},
+            'DATE OF BIRTH': {'DATE OF BIRTH'},
+            'DATE OF ISSUE': {'DATE OF ISSUE'},
+            'DATE OF EXPIRY': {'DATE OF EXPIRY'},
+            'SEX': {'SEX'},
+            'DOCUMENT NO': {'ID CARD NO', 'PASSPORT NO'},
+            'PERSONAL NO': {'PERSONAL NO'},
+            'NATIONALITY': {'NATIONALITY'},
+            'PLACE OF BIRTH': {'PLACE OF BIRTH'},
+            'AUTHORITY': {'AUTHORITY'},
         }
 
         detected = set(self.ner_entities.keys())
+        detected_slots = {slot for slot, keys in expected_slots.items() if detected & keys}
+        missing_slots = sorted(set(expected_slots.keys()) - detected_slots)
+
         self.ner_metrics = {
             "detected_fields": sorted(detected),
-            "missing_fields": sorted(EXPECTED_FIELDS - detected),
-            "detected_count": len(detected),
-            "expected_count": len(EXPECTED_FIELDS),
-            "ner_recall": len(detected) / len(EXPECTED_FIELDS)
+            "missing_fields": missing_slots,
+            "detected_count": len(detected_slots),
+            "expected_count": len(expected_slots),
+            "ner_recall": len(detected_slots) / len(expected_slots)
         }
         self.missing_ner_fields = self.ner_metrics["missing_fields"]
 
@@ -1029,7 +1033,7 @@ class DocumentForgeryDetector:
 
         # Named Entities (Omitted for brevity, assumed included)
         report.append("Named Entities (scoped fields):")
-        ner_keys_order = ['SURNAME', 'GIVEN NAME', 'NATIONALITY', 'ID CARD NO', 'PLACE OF BIRTH', 'DATE OF BIRTH', 'GENDER', 'DATE OF ISSUE', 'DATE OF EXPIRY', 'SIGNATURE', 'PERSONAL NO', 'AUTHORITY']
+        ner_keys_order = ['SURNAME', 'GIVEN NAME', 'FULL NAME', 'NATIONALITY', 'PASSPORT NO', 'ID CARD NO', 'PERSONAL NO', 'PLACE OF BIRTH', 'DATE OF BIRTH', 'SEX', 'HEIGHT', 'DATE OF ISSUE', 'DATE OF EXPIRY', 'AUTHORITY', 'SIGNATURE', 'MRZ LINE 1', 'MRZ LINE 2']
         detected_keys = [k for k in ner_keys_order if k in self.ner_entities]
         for entity in detected_keys:
             data = self.ner_entities[entity]
