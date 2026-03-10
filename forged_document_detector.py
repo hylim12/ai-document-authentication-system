@@ -84,6 +84,7 @@ class DocumentForgeryDetector:
         self.final_verdict = "VERDICT NOT RUN"
         self.forgery_features = {}
         self.forgery_issues = []
+        self.risk_score = 0.0
 
 
     def preprocess_image(self):
@@ -653,7 +654,82 @@ class DocumentForgeryDetector:
         except Exception as e:
             self.log.append(f"- PaddleOCR Error: {e}")
             self.ocr_full_text = "OCR ERROR"
-        
+
+    def _parse_date_from_text(self, text):
+        """Parse a date value from OCR text using common ID formats."""
+        if not text:
+            return None
+
+        raw = str(text).upper()
+        # Try extracting a date-shaped substring first to survive OCR label noise.
+        patterns = [
+            r"\b\d{1,2}[\-/\.]\d{1,2}[\-/\.]\d{2,4}\b",
+            r"\b\d{4}[\-/\.]\d{1,2}[\-/\.]\d{1,2}\b",
+            r"\b\d{1,2}\s+[A-Z]{3,9}\s+\d{2,4}\b",
+        ]
+
+        candidates = []
+        for pat in patterns:
+            m = re.search(pat, raw)
+            if m:
+                candidates.append(m.group(0))
+
+        cleaned = re.sub(r"[^0-9A-Z\-/\. ]", " ", raw).strip()
+        cleaned = re.sub(r"\s+", " ", cleaned)
+        candidates.extend([cleaned, cleaned.replace('.', '-'), cleaned.replace('/', '-')])
+
+        formats = (
+            "%d-%m-%Y", "%d-%m-%y", "%Y-%m-%d",
+            "%d/%m/%Y", "%d/%m/%y", "%Y/%m/%d",
+            "%d.%m.%Y", "%d.%m.%y", "%Y.%m.%d",
+            "%d %m %Y", "%d %m %y", "%Y %m %d",
+            "%d %b %Y", "%d %B %Y", "%d %b %y", "%d %B %y",
+        )
+
+        for cand in candidates:
+            cand = cand.strip()
+            for fmt in formats:
+                try:
+                    return datetime.datetime.strptime(cand, fmt).date()
+                except ValueError:
+                    continue
+        return None
+
+    def evaluate_logical_consistency(self):
+        """Check date ordering rules and store critical logical issues."""
+        self.forgery_issues = []
+        dob_raw = self.ner_entities.get("DATE OF BIRTH", {}).get("text", "")
+        doi_raw = self.ner_entities.get("DATE OF ISSUE", {}).get("text", "")
+        doe_raw = self.ner_entities.get("DATE OF EXPIRY", {}).get("text", "")
+
+        dob = self._parse_date_from_text(dob_raw)
+        doi = self._parse_date_from_text(doi_raw)
+        doe = self._parse_date_from_text(doe_raw)
+
+        if dob and doi and dob >= doi:
+            self.forgery_issues.append(
+                f"DATE OF BIRTH ({dob_raw}) is not earlier than DATE OF ISSUE ({doi_raw})."
+            )
+        if doi and doe and doi >= doe:
+            self.forgery_issues.append(
+                f"DATE OF ISSUE ({doi_raw}) is not earlier than DATE OF EXPIRY ({doe_raw})."
+            )
+
+        self.log.append(f"- Logical date checks: {len(self.forgery_issues)} issue(s).")
+        return self.forgery_issues
+
+    def calculate_risk_score(self):
+        """Aggregate anomaly severity into a normalized 0..100 forensic risk score."""
+        char_risk = sum(float(a.get("max_score", 0.0)) for a in self.anomalies)
+        bg_risk = sum(float(a.get("z_score", 0.0)) * 2.0 for a in self.background_anomalies)
+        ocr_risk = sum(float(a.get("max_score", 0.0)) * 2.5 for a in self.ocr_box_anomalies)
+        cluster_risk = sum(float(r.get("severity_proxy", 0.0)) * 1.5 for r in self.suspicious_regions)
+        logic_risk = 20.0 * len(self.forgery_issues)
+
+        raw_risk = char_risk + bg_risk + ocr_risk + cluster_risk + logic_risk
+        self.risk_score = float(min(100.0, raw_risk))
+        self.log.append(f"- Composite risk score: {self.risk_score:.2f}/100")
+        return self.risk_score
     
     def generate_training_features(self):
         """
@@ -664,7 +740,26 @@ class DocumentForgeryDetector:
         # Baseline Character Statistics (Global means and STDs)
         stats = self.baseline_stats if self.baseline_stats else {}
         total_chars = len(self.characters)
-        
+        font_size_variance = float(np.var([c['height'] for c in self.characters])) if self.characters else 0.0
+        ocr_confidence_mean = float(np.mean([b.get('confidence', 0.0) for b in self.ocr_boxes])) if self.ocr_boxes else 0.0
+
+        field_blur_values = []
+        for entity in self.ner_entities.values():
+            bbox = entity.get('bbox')
+            if not bbox or len(bbox) != 4:
+                continue
+            x1, y1, x2, y2 = bbox
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(self.width, x2), min(self.height, y2)
+            if x2 <= x1 or y2 <= y1:
+                continue
+            roi = self.gray_original[y1:y2, x1:x2]
+            if roi.size == 0:
+                continue
+            field_blur_values.append(float(cv2.Laplacian(roi, cv2.CV_64F).var()))
+
+        field_blur_variance = float(np.var(field_blur_values)) if field_blur_values else 0.0
+
         geo_anomalies = sum(
             1 for a in self.anomalies
             if any(t.startswith("GLOBAL") for t in a['types'])
@@ -679,10 +774,10 @@ class DocumentForgeryDetector:
         # Feature Vector Assembly 
         self.forgery_features = {
             'Char_Count': total_chars,
-            'NER_Detected_Count': self.ner_completeness['detected_count']
-                if hasattr(self, 'ner_completeness') else 0,
-            'NER_Completeness_Ratio': self.ner_completeness['completeness_ratio']
-                if hasattr(self, 'ner_completeness') else 0.0,
+            'NER_Detected_Count': self.ner_metrics.get('detected_count', 0)
+                if hasattr(self, 'ner_metrics') else 0,
+            'NER_Completeness_Ratio': self.ner_metrics.get('ner_recall', 0.0)
+                if hasattr(self, 'ner_metrics') else 0.0,
             'H_Mean': stats.get('height_mean', 0), 'H_STD': stats.get('height_std', 0),
             'W_Mean': stats.get('width_mean', 0), 'W_STD': stats.get('width_std', 0),
             'AR_Mean': stats.get('aspect_ratio_mean', 0), 'AR_STD': stats.get('aspect_ratio_std', 0),
@@ -693,9 +788,15 @@ class DocumentForgeryDetector:
             'Ink_Anomaly_Ratio': ink_anomalies / (total_chars + 1e-6),
             'BG_Mean': self.background_stats.get('mean', 0) if self.background_stats else 0,
             'BG_STD': self.background_stats.get('std', 0) if self.background_stats else 0,
+            # Legacy count features kept for backward compatibility with existing datasets/models
             'OCR_Box_Anomalies_Count': len(self.ocr_box_anomalies),
             'BG_Anomaly_Line_Count': len(self.background_anomalies),
             'Clustered_Regions_Count': len(self.suspicious_regions),
+            # New engineered features
+            'Font_Size_Variance': font_size_variance,
+            'OCR_Confidence_Mean': ocr_confidence_mean,
+            'Field_Blur_Variance': field_blur_variance,
+            'Risk_Score': self.calculate_risk_score(),
         }
         
         self.log.append(f"- Feature vector generated with {len(self.forgery_features)} metrics.")
@@ -720,6 +821,7 @@ class DocumentForgeryDetector:
             self.calculate_background_stats()
             self.detect_background_anomalies(sensitivity=bg_sensitivity)
             self.calculate_baseline_statistics()
+            self.evaluate_logical_consistency()
             
             # 4. Detect anomalies and cluster
             self.detect_anomalies(sensitivity=char_sensitivity)
@@ -843,16 +945,16 @@ class DocumentForgeryDetector:
         report.append("-" * 80)
 
         # FINAL VERDICT
-        total_suspicion_score = (len(self.anomalies) * 1) + (len(self.background_anomalies) * 5) + (len(self.ocr_box_anomalies) * 10) + (len(self.suspicious_regions) * 15)
+        risk_score = self.risk_score if self.risk_score else self.calculate_risk_score()
         
         if self.forgery_issues:
             verdict = "**CRITICAL LOGICAL FORGERY**"; confidence = 99.9
             reason = "Critical logical content inconsistencies detected by OCR analysis."
-        elif total_suspicion_score > 50: 
-            verdict = "SUSPICIOUS (ML Ready)"; confidence = min(99.0, 50.0 + total_suspicion_score * 0.5)
-            reason = f"High cumulative heuristic score ({total_suspicion_score}) indicating many physical anomalies. Features ready for full ML classification."
+        elif risk_score > 50:
+            verdict = "SUSPICIOUS (ML Ready)"; confidence = min(99.0, 50.0 + risk_score * 0.5)
+            reason = f"High cumulative risk score ({risk_score:.2f}/100) indicating likely physical anomalies. Features ready for full ML classification."
         else:
-            verdict = "FEATURES COLLECTED (ML Ready)"; confidence = 90.0 - (total_suspicion_score * 0.2)
+            verdict = "FEATURES COLLECTED (ML Ready)"; confidence = 90.0 - (risk_score * 0.2)
             reason = "Feature vector collected. Minimal physical anomalies detected. Document is ready for final classification by the trained model."
             
         self.final_verdict = verdict.strip('*').split('(')[0].strip()
