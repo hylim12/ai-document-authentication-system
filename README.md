@@ -56,6 +56,8 @@ pip install opencv-python paddleocr paddlepaddle scikit-learn pandas matplotlib
     - Uses smaller resize width (1000 px)
   - Custom fast run examples:
     - `python forged_document_detector.py --max-docs-per-split 10 --skip-png --resize-width 900`
+    - `python forged_document_detector.py --only-training --max-docs-per-split 10 --skip-png --resize-width 900`
+    - `python forged_document_detector.py --splits training --max-docs-per-split 30`
     - `python forged_document_detector.py --training-dirs datasets/training_set --validation-dirs datasets/validation_set --test-dirs datasets/testing_set --max-docs-per-split 30`
   - Why this is faster:
     - OCR + contouring dominate runtime; fewer images + smaller resolution significantly reduce processing time.

@@ -1277,19 +1277,15 @@ def _print_overall_summary(summaries):
         print(f"  Genuine: {summary['actual_genuine']} | Forged: {summary['actual_forged']} | Flagged: {summary['detected_as_forged']}")
         print(f"  Countries: {dict(summary['country_counts'])}")
         print("-"*72)
-def generate_datasets(training_dirs=None, validation_dirs=None, test_dirs=None, max_docs_per_split=None, auto_save_png=True, target_width=1500):
-    """Generate train/validation/test CSVs from separate folders.
-
-    Defaults:
-    - training_dirs: ["training_set"]
-    - validation_dirs: ["validation_set"]
-    - test_dirs: ["testing_set"]
-    """
+def generate_datasets(training_dirs=None, validation_dirs=None, test_dirs=None, splits=None, max_docs_per_split=None, auto_save_png=True, target_width=1500):
+    """Generate dataset CSVs for the requested split(s)."""
     out_folder = ensure_output_folder()
 
     training_dirs = _normalize_dirs(training_dirs, "training_set")
     validation_dirs = _normalize_dirs(validation_dirs, "validation_set")
     test_dirs = _normalize_dirs(test_dirs, "testing_set")
+
+    normalized_splits = [s.lower() for s in (splits or ["training", "validation", "test"])]
 
     shared_engine = None
     if PaddleOCR is not None:
@@ -1298,64 +1294,65 @@ def generate_datasets(training_dirs=None, validation_dirs=None, test_dirs=None, 
     else:
         print("\n[WARNING] PaddleOCR not installed. Running feature extraction without OCR semantics.")
 
-    training_paths = _collect_image_paths(training_dirs, max_docs=max_docs_per_split)
-    validation_paths = _collect_image_paths(validation_dirs, max_docs=max_docs_per_split)
-    test_paths = _collect_image_paths(test_dirs, max_docs=max_docs_per_split)
-
-    if not training_paths:
-        print(f"[FATAL ERROR] No images found for training in: {training_dirs}")
-        return
-    if not validation_paths:
-        print(f"[WARNING] No images found for validation in: {validation_dirs}")
-    if not test_paths:
-        print(f"[WARNING] No images found for testing in: {test_dirs}")
-
     all_summaries = []
 
-    training_data, train_summary = _build_feature_rows(
-        training_paths,
-        shared_engine,
-        dataset_name="Training Set",
-        auto_save_png=auto_save_png,
-        target_width=target_width,
-    )
-    if training_data:
-        write_csv(training_data, "ml_training_data.csv")
-    _print_summary(train_summary, out_folder, "ml_training_data.csv")
-    all_summaries.append((train_summary, "ml_training_data.csv"))
-
-    if validation_paths:
-        validation_data, validation_summary = _build_feature_rows(
-            validation_paths,
+    if "training" in normalized_splits:
+        training_paths = _collect_image_paths(training_dirs, max_docs=max_docs_per_split)
+        if not training_paths:
+            print(f"[FATAL ERROR] No images found for training in: {training_dirs}")
+            return
+        training_data, train_summary = _build_feature_rows(
+            training_paths,
             shared_engine,
-            dataset_name="Validation Set",
+            dataset_name="Training Set",
             auto_save_png=auto_save_png,
             target_width=target_width,
         )
-        if validation_data:
-            write_csv(validation_data, "ml_validation_data.csv")
-        _print_summary(validation_summary, out_folder, "ml_validation_data.csv")
-    else:
-        validation_summary = _empty_summary("Validation Set")
-        _print_summary(validation_summary, out_folder, "ml_validation_data.csv")
-    all_summaries.append((validation_summary, "ml_validation_data.csv"))
+        if training_data:
+            write_csv(training_data, "ml_training_data.csv")
+        _print_summary(train_summary, out_folder, "ml_training_data.csv")
+        all_summaries.append((train_summary, "ml_training_data.csv"))
 
-    if test_paths:
-        test_data, test_summary = _build_feature_rows(
-            test_paths,
-            shared_engine,
-            dataset_name="Test Set",
-            auto_save_png=auto_save_png,
-            target_width=target_width,
-        )
-        if test_data:
-            write_csv(test_data, "ml_test_data.csv")
-        _print_summary(test_summary, out_folder, "ml_test_data.csv")
-    else:
-        test_summary = _empty_summary("Test Set")
-        _print_summary(test_summary, out_folder, "ml_test_data.csv")
-    all_summaries.append((test_summary, "ml_test_data.csv"))
+    if "validation" in normalized_splits:
+        validation_paths = _collect_image_paths(validation_dirs, max_docs=max_docs_per_split)
+        if validation_paths:
+            validation_data, validation_summary = _build_feature_rows(
+                validation_paths,
+                shared_engine,
+                dataset_name="Validation Set",
+                auto_save_png=auto_save_png,
+                target_width=target_width,
+            )
+            if validation_data:
+                write_csv(validation_data, "ml_validation_data.csv")
+            _print_summary(validation_summary, out_folder, "ml_validation_data.csv")
+        else:
+            validation_summary = _empty_summary("Validation Set")
+            _print_summary(validation_summary, out_folder, "ml_validation_data.csv")
+        all_summaries.append((validation_summary, "ml_validation_data.csv"))
 
+    if "test" in normalized_splits:
+        test_paths = _collect_image_paths(test_dirs, max_docs=max_docs_per_split)
+        if test_paths:
+            test_data, test_summary = _build_feature_rows(
+                test_paths,
+                shared_engine,
+                dataset_name="Test Set",
+                auto_save_png=auto_save_png,
+                target_width=target_width,
+            )
+            if test_data:
+                write_csv(test_data, "ml_test_data.csv")
+            _print_summary(test_summary, out_folder, "ml_test_data.csv")
+        else:
+            test_summary = _empty_summary("Test Set")
+            _print_summary(test_summary, out_folder, "ml_test_data.csv")
+        all_summaries.append((test_summary, "ml_test_data.csv"))
+
+    if not all_summaries:
+            print("[WARNING] No dataset splits were selected. Use --splits and/or --only-training.")
+            return
+    
     _print_overall_summary(all_summaries)
 
 def write_csv(data_list, filename):
@@ -1386,8 +1383,13 @@ if __name__ == "__main__":
     parser.add_argument("--training-dirs", nargs="+", default=["datasets/training_set"])
     parser.add_argument("--validation-dirs", nargs="+", default=["datasets/validation_set"])
     parser.add_argument("--test-dirs", nargs="+", default=["datasets/testing_set"])
+    parser.add_argument("--splits", nargs="+", choices=["training", "validation", "test"],
+                        default=["training", "validation", "test"],
+                        help="Choose which dataset split(s) to process. Default: training validation test.")
+    parser.add_argument("--only-training", action="store_true",
+                        help="Shortcut for low-cost runs: equivalent to --splits training.")
     parser.add_argument("--max-docs-per-split", type=int, default=None,
-                        help="Limit each split to the first N docs for faster debug loops.")
+                        help="Limit each selected split to the first N docs for faster debug loops.")
     parser.add_argument("--skip-png", action="store_true",
                         help="Skip saving analysis PNGs to speed up batch runs.")
     parser.add_argument("--resize-width", type=int, default=1500,
@@ -1399,6 +1401,10 @@ if __name__ == "__main__":
     max_docs = args.max_docs_per_split
     skip_png = args.skip_png
     resize_width = args.resize_width
+
+    selected_splits = [s.lower() for s in args.splits]
+    if args.only_training:
+        selected_splits = ["training"]
 
     if args.quick:
         max_docs = 20 if max_docs is None else min(max_docs, 20)
@@ -1413,6 +1419,7 @@ if __name__ == "__main__":
         training_dirs=args.training_dirs,
         validation_dirs=args.validation_dirs,
         test_dirs=args.test_dirs,
+        splits=selected_splits,
         max_docs_per_split=max_docs,
         auto_save_png=not skip_png,
         target_width=resize_width,
