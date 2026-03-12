@@ -185,6 +185,7 @@ def extract_passport_fields_llm(ocr_json_path: str, model: str = "openai/gpt-4o-
             temperature=0,
             max_tokens=200,
             top_p=1,
+            response_format={"type": "json_object"}
         )
     except Exception as e:
         msg = str(e)
