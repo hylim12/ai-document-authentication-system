@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from typing import Dict, List, Any
 
 from prompts.passport_ner_prompt import build_passport_ner_prompt
@@ -32,6 +33,7 @@ def _load_key_from_dotenv(dotenv_path: str = ".env") -> str:
     except Exception:
         return ""
     return ""
+
 
 
 def _resolve_llm_config(default_model: str) -> tuple[str, str, str]:
@@ -77,6 +79,43 @@ def _canonicalize_field_name(field: str) -> str:
     }
     return aliases.get(norm, norm)
 
+import re
+
+def _filter_ocr_rows_for_llm(rows):
+    """
+    Reduce OCR rows to only those likely containing identity fields.
+    This greatly reduces token usage for the LLM.
+    """
+    keyword_pattern = re.compile(
+        r"(surname|given|name|birth|date|issue|expiry|sex|nationality|place|personal|passport|card|authority|height|mrz|nr|no)",
+        re.IGNORECASE
+    )
+
+    filtered = []
+
+    for r in rows:
+        text = r.get("text", "").strip()
+
+        # keep if contains keyword
+        if keyword_pattern.search(text):
+            filtered.append(r)
+            continue
+
+        # keep if looks like a date
+        if re.search(r"\d{1,2}[./-]\d{1,2}[./-]\d{2,4}", text):
+            filtered.append(r)
+            continue
+
+        # keep if long alphanumeric (passport numbers etc.)
+        if re.search(r"[A-Z0-9]{6,}", text):
+            filtered.append(r)
+            continue
+
+        # keep MRZ-like lines
+        if "<" in text:
+            filtered.append(r)
+
+    return filtered
 
 def load_ocr_json(json_path: str) -> List[Dict[str, Any]]:
     """Load OCR JSON file and return normalized OCR rows for prompting."""
@@ -129,7 +168,11 @@ def extract_passport_fields_llm(ocr_json_path: str, model: str = "openai/gpt-4o-
         ) from e
 
     ocr_rows = load_ocr_json(ocr_json_path)
-    prompt = build_passport_ner_prompt(ocr_rows)
+
+    # Reduce OCR rows before sending to LLM
+    filtered_rows = _filter_ocr_rows_for_llm(ocr_rows)
+
+    prompt = build_passport_ner_prompt(filtered_rows)
 
     client = OpenAI(api_key=api_key, base_url=base_url)
     try:
@@ -140,6 +183,8 @@ def extract_passport_fields_llm(ocr_json_path: str, model: str = "openai/gpt-4o-
                 {"role": "user", "content": prompt},
             ],
             temperature=0,
+            max_tokens=200,
+            top_p=1,
         )
     except Exception as e:
         msg = str(e)
