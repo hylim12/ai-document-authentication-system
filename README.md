@@ -93,8 +93,8 @@ Setup examples:
   - `$env:OPENROUTER_API_KEY="sk-or-..."`
 
 Optional controls:
-- Choose OpenRouter model (example):
-  - `export OPENROUTER_MODEL="openai/gpt-4o-mini"`
+- Choose OpenRouter model (recommended for this project):
+  - `export OPENROUTER_MODEL="openai/gpt-oss-120b:free"`
 - Override OpenRouter base URL (optional):
   - `export OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"`
 - Disable LLM NER explicitly (force regex-only NER):

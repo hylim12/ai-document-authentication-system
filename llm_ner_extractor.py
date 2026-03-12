@@ -1,5 +1,6 @@
 """LLM-based NER extraction for passport/ID OCR JSON outputs."""
 
+import ast
 import json
 import os
 import re
@@ -7,7 +8,8 @@ from typing import Dict, List, Any
 
 from prompts.passport_ner_prompt import build_passport_ner_prompt
 
-
+DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_OPENROUTER_MODEL = "openai/gpt-oss-120b:free"
 
 class LLMNERQuotaError(RuntimeError):
     """Raised when API quota/billing limits block LLM NER."""
@@ -41,7 +43,7 @@ def _resolve_llm_config(default_model: str) -> tuple[str, str, str]:
     api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
     if not api_key:
         api_key = _load_key_from_dotenv()
-    base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").strip()
+    base_url = os.getenv("OPENROUTER_BASE_URL", DEFAULT_OPENROUTER_BASE_URL).strip()
     model = os.getenv("OPENROUTER_MODEL", default_model).strip() or default_model
     return api_key, base_url, model
 
@@ -146,6 +148,7 @@ def _strip_markdown_fences(content: str) -> str:
         content = re.sub(r"\n```$", "", content)
     return content.strip()
 
+
 def _extract_largest_balanced_json_object(content: str) -> str:
     """Extract the largest balanced {...} JSON object while respecting quoted strings."""
     best = ""
@@ -183,6 +186,17 @@ def _extract_largest_balanced_json_object(content: str) -> str:
     return best
 
 
+def _parse_python_literal_object(candidate: str) -> Dict[str, Any] | None:
+    """Parse Python-literal style dict/list output (single quotes, True/False/None)."""
+    try:
+        parsed = ast.literal_eval(candidate)
+    except (ValueError, SyntaxError):
+        return None
+    if isinstance(parsed, dict):
+        return parsed
+    return None
+
+
 def _repair_common_json_issues(candidate: str) -> str:
     """Repair minor JSON issues often produced by LLMs."""
     repaired = candidate
@@ -209,13 +223,50 @@ def _safe_parse_json(content: str) -> Dict[str, Any]:
             return json.loads(attempt)
         except json.JSONDecodeError as e:
             last_error = e
-            continue
+
+        python_like = _parse_python_literal_object(attempt)
+        if python_like is not None:
+            return python_like
 
     if last_error is not None:
         raise last_error
     raise json.JSONDecodeError("Failed to parse JSON", content, 0)
 
-def extract_passport_fields_llm(ocr_json_path: str, model: str = "openai/gpt-4o-mini") -> Dict[str, Dict[str, Any]]:
+
+def _create_ner_completion(client, resolved_model: str, prompt: str):
+    """Create completion, preferring JSON-formatted responses when supported."""
+    base_messages = [
+        {"role": "system", "content": "You are a strict JSON information extraction engine."},
+        {"role": "user", "content": prompt},
+    ]
+
+    common_kwargs = {
+        "model": resolved_model,
+        "messages": base_messages,
+        "temperature": 0,
+        "max_tokens": 200,
+        "top_p": 1,
+    }
+
+    try:
+        return client.chat.completions.create(
+            **common_kwargs,
+            response_format={"type": "json_object"},
+        )
+    except Exception as e:
+        msg = str(e).lower()
+        unsupported = any(token in msg for token in (
+            "response_format",
+            "json_schema",
+            "not supported",
+            "unsupported",
+            "invalid_request_error",
+        ))
+        if unsupported:
+            return client.chat.completions.create(**common_kwargs)
+        raise
+
+def extract_passport_fields_llm(ocr_json_path: str, model: str = DEFAULT_OPENROUTER_MODEL) -> Dict[str, Dict[str, Any]]:
     """Extract dynamic passport/ID entities from OCR JSON using OpenRouter (OpenAI SDK)."""
     api_key, base_url, resolved_model = _resolve_llm_config(model)
     if not api_key:
@@ -232,25 +283,11 @@ def extract_passport_fields_llm(ocr_json_path: str, model: str = "openai/gpt-4o-
         ) from e
 
     ocr_rows = load_ocr_json(ocr_json_path)
-
-    # Reduce OCR rows before sending to LLM
-    filtered_rows = _filter_ocr_rows_for_llm(ocr_rows)
-
-    prompt = build_passport_ner_prompt(filtered_rows)
+    prompt = build_passport_ner_prompt(ocr_rows)
 
     client = OpenAI(api_key=api_key, base_url=base_url)
     try:
-        response = client.chat.completions.create(
-            model=resolved_model,
-            messages=[
-                {"role": "system", "content": "You are a strict JSON information extraction engine."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0,
-            max_tokens=200,
-            top_p=1,
-            response_format={"type": "json_object"}
-        )
+        response = _create_ner_completion(client, resolved_model, prompt)
     except Exception as e:
         msg = str(e)
         if "insufficient_quota" in msg or "Error code: 429" in msg or "quota" in msg.lower():
