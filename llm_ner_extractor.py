@@ -138,18 +138,82 @@ def load_ocr_json(json_path: str) -> List[Dict[str, Any]]:
     return normalized
 
 
-def _safe_parse_json(content: str) -> Dict[str, Any]:
-    """Parse JSON content; fallback to extracting the largest JSON object."""
+def _strip_markdown_fences(content: str) -> str:
+    """Remove common markdown code fences around JSON payloads."""
     content = content.strip()
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError:
-        start = content.find("{")
-        end = content.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            return json.loads(content[start:end + 1])
-        raise
+    if content.startswith("```"):
+        content = re.sub(r"^```[a-zA-Z0-9_-]*\n", "", content)
+        content = re.sub(r"\n```$", "", content)
+    return content.strip()
 
+def _extract_largest_balanced_json_object(content: str) -> str:
+    """Extract the largest balanced {...} JSON object while respecting quoted strings."""
+    best = ""
+    stack = []
+    in_string = False
+    escape = False
+    start_idx = None
+
+    for i, ch in enumerate(content):
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+            continue
+
+        if ch == '{':
+            if not stack:
+                start_idx = i
+            stack.append(ch)
+        elif ch == '}' and stack:
+            stack.pop()
+            if not stack and start_idx is not None:
+                candidate = content[start_idx:i + 1]
+                if len(candidate) > len(best):
+                    best = candidate
+                start_idx = None
+
+    return best
+
+
+def _repair_common_json_issues(candidate: str) -> str:
+    """Repair minor JSON issues often produced by LLMs."""
+    repaired = candidate
+    # Remove trailing commas before object/array close.
+    repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+    # Replace non-standard numeric literals with null.
+    repaired = re.sub(r"\bNaN\b|\bInfinity\b|-Infinity", "null", repaired)
+    return repaired
+
+
+def _safe_parse_json(content: str) -> Dict[str, Any]:
+    """Parse JSON content with safe fallbacks for markdown and minor format glitches."""
+    content = _strip_markdown_fences(content)
+
+    parse_attempts = [content]
+    extracted = _extract_largest_balanced_json_object(content)
+    if extracted:
+        parse_attempts.append(extracted)
+        parse_attempts.append(_repair_common_json_issues(extracted))
+
+    last_error = None
+    for attempt in parse_attempts:
+        try:
+            return json.loads(attempt)
+        except json.JSONDecodeError as e:
+            last_error = e
+            continue
+
+    if last_error is not None:
+        raise last_error
+    raise json.JSONDecodeError("Failed to parse JSON", content, 0)
 
 def extract_passport_fields_llm(ocr_json_path: str, model: str = "openai/gpt-4o-mini") -> Dict[str, Dict[str, Any]]:
     """Extract dynamic passport/ID entities from OCR JSON using OpenRouter (OpenAI SDK)."""
