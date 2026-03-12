@@ -1,0 +1,131 @@
+{
+  "holdout": {
+    "dataset": "Hold-out Test",
+    "accuracy": 0.8888888888888888,
+    "balanced_accuracy": 0.9,
+    "precision": 0.8,
+    "recall": 1.0,
+    "f1_score": 0.8888888888888888,
+    "mcc": 0.8,
+    "roc_auc": 1.0,
+    "classification_report": {
+      "Genuine": {
+        "precision": 1.0,
+        "recall": 0.8,
+        "f1-score": 0.8888888888888888,
+        "support": 5.0
+      },
+      "Forged": {
+        "precision": 0.8,
+        "recall": 1.0,
+        "f1-score": 0.8888888888888888,
+        "support": 4.0
+      },
+      "accuracy": 0.8888888888888888,
+      "macro avg": {
+        "precision": 0.9,
+        "recall": 0.9,
+        "f1-score": 0.8888888888888888,
+        "support": 9.0
+      },
+      "weighted avg": {
+        "precision": 0.911111111111111,
+        "recall": 0.8888888888888888,
+        "f1-score": 0.8888888888888888,
+        "support": 9.0
+      }
+    },
+    "tn": 4,
+    "fp": 1,
+    "fn": 0,
+    "tp": 4,
+    "false_positive_rate": 0.2,
+    "false_negative_rate": 0.0
+  },
+  "validation_set": {
+    "dataset": "Validation Set",
+    "accuracy": 0.55,
+    "balanced_accuracy": 0.55,
+    "precision": 1.0,
+    "recall": 0.1,
+    "f1_score": 0.18181818181818182,
+    "mcc": 0.22941573387056174,
+    "roc_auc": 0.62,
+    "classification_report": {
+      "Genuine": {
+        "precision": 0.5263157894736842,
+        "recall": 1.0,
+        "f1-score": 0.6896551724137931,
+        "support": 10.0
+      },
+      "Forged": {
+        "precision": 1.0,
+        "recall": 0.1,
+        "f1-score": 0.18181818181818182,
+        "support": 10.0
+      },
+      "accuracy": 0.55,
+      "macro avg": {
+        "precision": 0.763157894736842,
+        "recall": 0.55,
+        "f1-score": 0.4357366771159875,
+        "support": 20.0
+      },
+      "weighted avg": {
+        "precision": 0.7631578947368421,
+        "recall": 0.55,
+        "f1-score": 0.43573667711598746,
+        "support": 20.0
+      }
+    },
+    "tn": 10,
+    "fp": 0,
+    "fn": 9,
+    "tp": 1,
+    "false_positive_rate": 0.0,
+    "false_negative_rate": 0.9
+  },
+  "testing_set": {
+    "dataset": "Test Set",
+    "accuracy": 0.4,
+    "balanced_accuracy": 0.5,
+    "precision": 0.0,
+    "recall": 0.0,
+    "f1_score": 0.0,
+    "mcc": 0.0,
+    "roc_auc": 0.75,
+    "classification_report": {
+      "Genuine": {
+        "precision": 0.4,
+        "recall": 1.0,
+        "f1-score": 0.5714285714285714,
+        "support": 8.0
+      },
+      "Forged": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1-score": 0.0,
+        "support": 12.0
+      },
+      "accuracy": 0.4,
+      "macro avg": {
+        "precision": 0.2,
+        "recall": 0.5,
+        "f1-score": 0.2857142857142857,
+        "support": 20.0
+      },
+      "weighted avg": {
+        "precision": 0.16,
+        "recall": 0.4,
+        "f1-score": 0.22857142857142856,
+        "support": 20.0
+      }
+    },
+    "tn": 8,
+    "fp": 0,
+    "fn": 12,
+    "tp": 0,
+    "false_positive_rate": 0.0,
+    "false_negative_rate": 1.0
+  }
+}
