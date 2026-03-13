@@ -688,6 +688,7 @@ class DocumentForgeryDetector:
                 extract_passport_fields_llm,
                 LLMNERQuotaError,
                 LLMNERConfigError,
+                LLMNERTokenLimitError,
             )
             llm_entities = extract_passport_fields_llm(ocr_json_path)
             if not llm_entities:
