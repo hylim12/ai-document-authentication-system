@@ -18,6 +18,8 @@ class LLMNERQuotaError(RuntimeError):
 class LLMNERConfigError(RuntimeError):
     """Raised when LLM NER is not correctly configured."""
 
+class LLMNERTokenLimitError(RuntimeError):
+    """Raised when the LLM request exceeds model context/token limits."""
 
 def _load_key_from_dotenv(dotenv_path: str = ".env") -> str:
     """Best-effort local .env loader for OPENROUTER_API_KEY."""
@@ -294,6 +296,17 @@ def extract_passport_fields_llm(ocr_json_path: str, model: str = DEFAULT_OPENROU
             raise LLMNERQuotaError(
                 "LLM provider quota exceeded (429 insufficient_quota). "
                 "Check billing/plan, or continue with regex fallback."
+            ) from e
+        token_limit_markers = (
+            "maximum context length",
+            "context length exceeded",
+            "too many tokens",
+            "token limit",
+        )
+        if any(marker in msg.lower() for marker in token_limit_markers):
+            raise LLMNERTokenLimitError(
+                "LLM request exceeded model token/context limits. "
+                "Reduce OCR payload size or use regex fallback."
             ) from e
         raise
 
