@@ -1,0 +1,17 @@
+# datasets
+datasets/
+
+# results
+final_results/
+
+# models
+*.csv
+*.pkl
+*.joblib
+
+# python
+__pycache__/
+.ipynb_checkpoints
+
+# environment variable
+.env

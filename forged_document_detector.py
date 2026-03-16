@@ -28,9 +28,24 @@ except ImportError:
     PaddleOCR = None 
 warnings.filterwarnings('ignore')
 
+try:
+    from llm_ner_extractor import (
+        extract_passport_fields_llm,
+        LLMNERQuotaError,
+        LLMNERConfigError,
+        LLMNERAuthError,
+        LLMNERTokenLimitError,
+    )
+    LLM_NER_IMPORT_ERROR = None
+except Exception as e:
+    extract_passport_fields_llm = None
+    LLMNERQuotaError = RuntimeError
+    LLMNERConfigError = RuntimeError
+    LLMNERAuthError = RuntimeError
+    LLMNERTokenLimitError = RuntimeError
+    LLM_NER_IMPORT_ERROR = e
 
 class DocumentForgeryDetector:
-
     def __init__(self, image_path, ocr_engine=None):
         """Initializes forensic storage and standardizes input resolution."""
         self.image_path = image_path
