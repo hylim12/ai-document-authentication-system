@@ -248,20 +248,6 @@ def _create_ner_completion(base_url: str, resolved_model: str, prompt: str, api_
     }
     attempts = [
             (
-                base + "/api/chat",
-                {
-                    "model": resolved_model,
-                    "stream": False,
-                    "format": "json",
-                    "messages": [
-                        {"role": "system", "content": "You are a strict JSON information extraction engine."},
-                        {"role": "user", "content": prompt},
-                    ],
-                    "options": {"temperature": 0, "top_p": 1, "num_predict": 256},
-                },
-                lambda parsed: parsed.get("message", {}).get("content", "{}"),
-            ),
-            (
                 base + "/api/generate",
                 {
                     "model": resolved_model,
@@ -271,9 +257,28 @@ def _create_ner_completion(base_url: str, resolved_model: str, prompt: str, api_
                         "You are a strict JSON information extraction engine. "
                         "Return JSON only.\n\n" + prompt
                     ),
-                    "options": {"temperature": 0, "top_p": 1, "num_predict": 256},
+                    "options": {"temperature": 0, "top_p": 1, "num_predict": 120},
                 },
                 lambda parsed: parsed.get("response", "{}"),
+            ),
+            (
+                base + "/api/chat",
+                {
+                    "model": resolved_model,
+                    "stream": False,
+                    "format": "json",
+                    "messages": [
+                        {"role": "system", "content": "You are a strict JSON information extraction engine."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "options": {"temperature": 0, "top_p": 1, "num_predict": 120},
+                },
+                lambda parsed: (
+                    parsed.get("message", {}).get("content")
+                    or parsed.get("response")
+                    or parsed.get("content")
+                    or "{}"
+                ),
             ),
             (
                 base + "/v1/chat/completions",
