@@ -36,7 +36,7 @@ def _load_env_value_from_dotenv(key: str, dotenv_path: str = ".env") -> str:
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 k, v = line.split("=", 1)
-                if k.strip() == "OPENROUTER_API_KEY":
+                if k.strip() == key:
                     return v.strip().strip('"').strip("'")
     except Exception:
         return ""
@@ -240,36 +240,90 @@ def _safe_parse_json(content: str) -> Dict[str, Any]:
 
 
 def _create_ner_completion(base_url: str, resolved_model: str, prompt: str, api_key: str = "") -> str:
-    """Create completion against a local Ollama-compatible server and return text content."""
-    endpoint = base_url.rstrip("/") + "/api/chat"
-    payload = {
-        "model": resolved_model,
-        "stream": False,
-        "format": "json",
-        "messages": [
-            {"role": "system", "content": "You are a strict JSON information extraction engine."},
-            {"role": "user", "content": prompt},
-        ],
-        "options": {
-            "temperature": 0,
-            "top_p": 1,
-            "num_predict": 256,
-        },
+    """Create completion against local LLM servers, trying common Ollama-compatible endpoints."""
+    base = base_url.rstrip("/")
+    headers = {
+        "Content-Type": "application/json",
+        **({"Authorization": f"Bearer {api_key}"} if api_key else {}),
     }
+    attempts = [
+            (
+                base + "/api/chat",
+                {
+                    "model": resolved_model,
+                    "stream": False,
+                    "format": "json",
+                    "messages": [
+                        {"role": "system", "content": "You are a strict JSON information extraction engine."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "options": {"temperature": 0, "top_p": 1, "num_predict": 256},
+                },
+                lambda parsed: parsed.get("message", {}).get("content", "{}"),
+            ),
+            (
+                base + "/api/generate",
+                {
+                    "model": resolved_model,
+                    "stream": False,
+                    "format": "json",
+                    "prompt": (
+                        "You are a strict JSON information extraction engine. "
+                        "Return JSON only.\n\n" + prompt
+                    ),
+                    "options": {"temperature": 0, "top_p": 1, "num_predict": 256},
+                },
+                lambda parsed: parsed.get("response", "{}"),
+            ),
+            (
+                base + "/v1/chat/completions",
+                {
+                    "model": resolved_model,
+                    "messages": [
+                        {"role": "system", "content": "You are a strict JSON information extraction engine."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0,
+                    "top_p": 1,
+                    "response_format": {"type": "json_object"},
+                    "max_tokens": 256,
+                },
+                lambda parsed: parsed.get("choices", [{}])[0].get("message", {}).get("content", "{}"),
+            ),
+        ]
+        
+    last_http_error = None
+    for endpoint, payload, extract_content in attempts:
+            req = request.Request(
+                endpoint,
+                data=json.dumps(payload).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            try:
+                with request.urlopen(req, timeout=120) as resp:
+                    body = resp.read().decode("utf-8", errors="replace")
+                parsed = json.loads(body)
+                content = extract_content(parsed)
+                if isinstance(content, str) and content.strip():
+                    return content
+                return "{}"
+            except error.HTTPError as e:
+                if e.code == 404:
+                    last_http_error = e
+                    continue
+                raise
 
-    req = request.Request(
-        endpoint,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            **({"Authorization": f"Bearer {api_key}"} if api_key else {}),
-        },
-        method="POST",
+    if last_http_error is not None:
+            raise LLMNERConfigError(
+                "Local LLM endpoint returned HTTP 404 Not Found on all supported paths. "
+                f"Configured LOCAL_LLM_BASE_URL={base_url}. Check Ollama version and APIs: "
+                "/api/chat, /api/generate, or /v1/chat/completions."
+            ) from last_http_error
+
+    raise LLMNERConfigError(
+        "No local LLM completion endpoint succeeded. Verify LOCAL_LLM_BASE_URL and server logs."
     )
-    with request.urlopen(req, timeout=120) as resp:
-        body = resp.read().decode("utf-8", errors="replace")
-    parsed = json.loads(body)
-    return parsed.get("message", {}).get("content", "{}")
 
 
 def extract_passport_fields_llm(ocr_json_path: str, model: str = DEFAULT_LOCAL_LLM_MODEL) -> Dict[str, Dict[str, Any]]:
@@ -282,6 +336,8 @@ def extract_passport_fields_llm(ocr_json_path: str, model: str = DEFAULT_LOCAL_L
     
     try:
         content = _create_ner_completion(base_url, resolved_model, prompt, api_key=api_key)
+    except LLMNERConfigError:
+        raise
     except error.URLError as e:
         raise LLMNERConfigError(
             "Cannot reach local LLM server. Start Ollama and verify LOCAL_LLM_BASE_URL "
@@ -290,6 +346,15 @@ def extract_passport_fields_llm(ocr_json_path: str, model: str = DEFAULT_LOCAL_L
     except Exception as e:
         msg = str(e)
         msg_lower = msg.lower()
+
+        if "404" in msg_lower or "not found" in msg_lower:
+            raise LLMNERConfigError(
+                "Local LLM endpoint returned HTTP 404 Not Found. "
+                f"Configured LOCAL_LLM_BASE_URL={base_url}. This usually means the server is reachable "
+                "but does not expose expected Ollama APIs. Verify Ollama version and that /api/chat, "
+                "/api/generate, or /v1/chat/completions is available. Also ensure LOCAL_LLM_BASE_URL "
+                "does not already include /api or /v1."
+            ) from e
 
         if "insufficient_quota" in msg or "error code: 429" in msg_lower or "quota" in msg_lower:
             raise LLMNERQuotaError(
@@ -317,6 +382,7 @@ def extract_passport_fields_llm(ocr_json_path: str, model: str = DEFAULT_LOCAL_L
             "too many tokens",
             "token limit",
         )
+
         if any(marker in msg_lower for marker in token_limit_markers):
             raise LLMNERTokenLimitError(
                 "LLM request exceeded model token/context limits. "
@@ -351,4 +417,4 @@ def extract_passport_fields_llm(ocr_json_path: str, model: str = DEFAULT_LOCAL_L
             "confidence": confidence,
         }
 
-        return normalized_entities
+    return normalized_entities

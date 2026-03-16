@@ -697,16 +697,18 @@ class DocumentForgeryDetector:
             self.log.append(f"- LLM NER skipped: {self.llm_ner_disabled_reason}")
             return
 
+        if extract_passport_fields_llm is None:
+            self.llm_ner_disabled_reason = "LLM module import failed"
+            print(
+                "[WARNING] LLM NER module unavailable. Using regex NER only. "
+                f"Reason: {LLM_NER_IMPORT_ERROR}"
+            )
+            self.log.append(f"- LLM NER import failed; regex fallback active: {LLM_NER_IMPORT_ERROR}")
+            return
+        
         print("[INFO] Running LLM-based NER extraction")
         self.log.append("- Running LLM-based NER extraction.")
         try:
-            from llm_ner_extractor import (
-                extract_passport_fields_llm,
-                LLMNERQuotaError,
-                LLMNERConfigError,
-                LLMNERAuthError,
-                LLMNERTokenLimitError,
-            )
             llm_entities = extract_passport_fields_llm(ocr_json_path)
             if not llm_entities:
                 raise ValueError("LLM returned no entities")
