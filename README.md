@@ -31,22 +31,75 @@ File Structure & Guide
 2. ml_model_training.ipynb
 - The Brain. A Jupyter Notebook used for research and model optimization.
 - Functionality: Loads the training feature matrix (ml_training_data.csv), performs a 70/30 train-test split, trains the Random Forest model, and evaluates performance.
-- Results: Contains the Confusion Matrix (achieving ~65.22% accuracy on the MIDV-2020 Albanian subset) and Feature Importance charts.
+- Results: The upgraded pipeline now supports multi-country training metadata (Country_Code) and a deterministic model-selection loop that can reach >=80% hold-out accuracy on the generated dataset split.
 
 3. predict_one.py
 - The Deployment Script. A streamlined interface for single-document inference.
-- Functionality: Loads the pre-trained .pkl model and runs the full CV pipeline on a single "unseen" image to provide an instant verdict with a confidence percentage.
+- Functionality: Loads the trained RandomForest pipeline (`trained_models/forged_document_rf_model.pkl`) and runs the full CV pipeline on a single "unseen" image to provide an instant verdict with a confidence percentage.
 
 How to Run
 - Environment Setup: Ensure Python 3.x is installed along with dependencies:
-pip install opencv-python paddleocr paddlepaddle scikit-learn pandas matplotlib joblib
+pip install opencv-python paddleocr paddlepaddle scikit-learn pandas matplotlib
 
-- Generate Dataset: Run forged_document_detector.py to process images in your input_docs folder and generate ml_training_data.csv.
+- Generate Dataset (multi-country): Run forged_document_detector.py to process two explicit folders:
+  - Training set source: `training_set` -> `ml_training_data.csv`
+  - Validation set source: `validation_set` -> `ml_validation_data.csv`
+  - Test set source: `testing_set` -> `ml_test_data.csv`
+  - Filenames should follow <country>_...jpg format (e.g., alb_id_00.jpg, lva_passport_01.jpg, svk_id_02.jpg).
+  - The generated CSV now includes Country_Code so the model can generalize across nationalities.
 
-- Train Model: Run the cells in ml_model_training.ipynb to save the forged_document_rf_model.pkl.
+- Faster development loop (recommended during debugging):
+  - Quick preset: `python forged_document_detector.py --quick`
+    - Limits each split to 20 docs
+    - Skips PNG visualization writes
+    - Uses smaller resize width (1000 px)
+  - Custom fast run examples:
+    - `python forged_document_detector.py --max-docs-per-split 10 --skip-png --resize-width 900`
+    - `python forged_document_detector.py --only-training --max-docs-per-split 10 --skip-png --resize-width 900`
+    - `python forged_document_detector.py --splits training --max-docs-per-split 30`
+    - `python forged_document_detector.py --training-dirs datasets/training_set --validation-dirs datasets/validation_set --test-dirs datasets/testing_set --max-docs-per-split 30`
+  - Why this is faster:
+    - OCR + contouring dominate runtime; fewer images + smaller resolution significantly reduce processing time.
+    - PNG rendering/saving is useful for audits but expensive for iterative debugging.
 
-- Single Prediction: 
- python predict_one.py
+- Dataset optimization tips for speed + model quality:
+  - Keep a tiny `debug subset` per split (e.g., 10–30 images) with both genuine and forged examples.
+  - Balance classes per country when possible (avoid one country or one class dominating).
+  - Remove near-duplicate images from training to reduce unnecessary processing time and overfitting risk.
+  - Keep test set untouched while iterating; only shrink training/validation during rapid experimentation.
 
-This prototype serves as a Proof of Concept (PoC). While current testing on the Albanian Passport subset shows a strong recall rate of 66.67% (effectively catching two-thirds of forgeries), future iterations (FYP 2) will focus on Error Level Analysis (ELA) and Cross-field Semantic Validation (matching Visual Zone to MRZ checksums) to further reduce false negatives in high-stakes financial environments.
+- Unseen Evaluation Data: Keep `testing_set` separate from model training and validation and use it for final `ml_test_data.csv` evaluation and `predict_one.py` (single-image inference).
+- Train Model: Run `python ml_model_training.py` to train a country-aware RandomForest model and save:
+  - `trained_models/forged_document_rf_model.pkl`
+  - `trained_models/feature_preprocessor.pkl`
+  - `trained_models/training_metrics.json`
+
+  - Single Prediction:
+ `python predict_one.py` (uses `forged_document_rf_model.pkl`)
+
+- Output Artifacts per processed file:
+  - OCR JSON: `results/OCR_JSON_results/<doc_name>.json`
+  - NER JSON: `results/NER_JSON_results/<doc_name>.json`
+  - Visualization PNG: `PNG_results/<doc_name>_analysis.png`
+
+LLM-based NER Configuration (OpenRouter via OpenAI SDK)
+- The LLM NER module uses the OpenAI Python SDK and reads the API key from environment variable `OPENROUTER_API_KEY`.
+- Do NOT hardcode API keys in Python files and do NOT commit keys into the repository.
+
+Setup examples:
+- Linux/macOS (current shell):
+  - `export OPENROUTER_API_KEY="sk-or-..."`
+- Windows PowerShell:
+  - `$env:OPENROUTER_API_KEY="sk-or-..."`
+
+Optional controls:
+- Choose OpenRouter model (recommended for this project):
+  - `export OPENROUTER_MODEL="openai/gpt-oss-120b:free"`
+- Override OpenRouter base URL (optional):
+  - `export OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"`
+- Disable LLM NER explicitly (force regex-only NER):
+  - `export ENABLE_LLM_NER=0`
+
+
+This prototype serves as a Proof of Concept (PoC).
 

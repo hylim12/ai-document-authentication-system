@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 from collections import defaultdict
 import warnings
 import os
+import argparse
 from PIL import Image
 import re 
 import datetime 
@@ -46,7 +47,8 @@ except Exception as e:
     LLM_NER_IMPORT_ERROR = e
 
 class DocumentForgeryDetector:
-    def __init__(self, image_path, ocr_engine=None):
+
+    def __init__(self, image_path, ocr_engine=None, target_width=1500):
         """Initializes forensic storage and standardizes input resolution."""
         self.image_path = image_path
         self.ocr_engine = ocr_engine
@@ -57,7 +59,7 @@ class DocumentForgeryDetector:
         try:
             # Standardize input for consistent feature extraction
             pil_image = Image.open(image_path).convert("RGB")
-            target_width = 1500
+            target_width = max(600, int(target_width))
             w_percent = target_width / float(pil_image.size[0])
             target_height = int(pil_image.size[1] * w_percent)
 
@@ -98,6 +100,9 @@ class DocumentForgeryDetector:
         self.final_verdict = "VERDICT NOT RUN"
         self.forgery_features = {}
         self.forgery_issues = []
+        self.risk_score = 0.0
+        self.llm_ner_disabled_reason = None
+
 
 
     def preprocess_image(self):
@@ -453,7 +458,7 @@ class DocumentForgeryDetector:
         return self.suspicious_regions
 
 
-    def identify_critical_entities_from_ocr(self):
+    def identify_critical_entities_from_ocr(self, print_summary=True):
         """
         Extracts and validates structured information from OCR results using geometric proximity and pattern matching.
         """
@@ -593,39 +598,155 @@ class DocumentForgeryDetector:
             }
             for k, v in entities.items()
         }
+        self.ner_source = "REGEX"
 
         # Calculate Recall Metrics: Evaluate extraction completeness for forensic reporting.
-        EXPECTED_FIELDS = {
-            'SURNAME',
-            'GIVEN NAME',
-            'DATE OF BIRTH',
-            'DATE OF ISSUE',
-            'DATE OF EXPIRY',
-            'SEX',
-            'ID CARD NO',
-            'PERSONAL NO',
-            'NATIONALITY',
-            'PLACE OF BIRTH',
-            'AUTHORITY'
+        self._update_ner_metrics()
+
+        if print_summary:
+            self.print_ner_fields_summary()
+
+    def _update_ner_metrics(self):
+        """Recompute NER completeness metrics from current ner_entities."""
+        expected_slots = {
+            'SURNAME': {'SURNAME'},
+            'GIVEN NAME': {'GIVEN NAME', 'FULL NAME'},
+            'DATE OF BIRTH': {'DATE OF BIRTH'},
+            'DATE OF ISSUE': {'DATE OF ISSUE'},
+            'DATE OF EXPIRY': {'DATE OF EXPIRY'},
+            'SEX': {'SEX'},
+            'DOCUMENT NO': {'ID CARD NO', 'PASSPORT NO'},
+            'PERSONAL NO': {'PERSONAL NO'},
+            'NATIONALITY': {'NATIONALITY'},
+            'PLACE OF BIRTH': {'PLACE OF BIRTH'},
+            'AUTHORITY': {'AUTHORITY'},
         }
 
         detected = set(self.ner_entities.keys())
+        detected_slots = {slot for slot, keys in expected_slots.items() if detected & keys}
+        missing_slots = sorted(set(expected_slots.keys()) - detected_slots)
+
         self.ner_metrics = {
             "detected_fields": sorted(detected),
-            "missing_fields": sorted(EXPECTED_FIELDS - detected),
-            "detected_count": len(detected),
-            "expected_count": len(EXPECTED_FIELDS),
-            "ner_recall": len(detected) / len(EXPECTED_FIELDS)
+            "missing_fields": missing_slots,
+            "detected_count": len(detected_slots),
+            "expected_count": len(expected_slots),
+            "ner_recall": len(detected_slots) / len(expected_slots)
         }
         self.missing_ner_fields = self.ner_metrics["missing_fields"]
 
-        # Log findings
+    def _ocr_json_output_path(self, image_path):
+        """Build OCR JSON path consistent with save_ocr_json output."""
+        json_dir = os.path.join("final_results\\results", "OCR_JSON_results")
+        image_name = os.path.basename(image_path)
+        json_name = os.path.splitext(image_name)[0] + ".json"
+        return os.path.join(json_dir, json_name)
+
+    def _ner_json_output_path(self, image_path):
+        """Build NER JSON path for LLM/regex extracted entities."""
+        json_dir = os.path.join("final_results\\results", "NER_JSON_results")
+        image_name = os.path.basename(image_path)
+        json_name = os.path.splitext(image_name)[0] + ".json"
+        return os.path.join(json_dir, json_name)
+
+    def save_ner_json(self, image_path):
+        """Save extracted NER entities to dedicated JSON output folder."""
+        ner_json_path = self._ner_json_output_path(image_path)
+        os.makedirs(os.path.dirname(ner_json_path), exist_ok=True)
+
+        data = {
+            "image_name": os.path.basename(image_path),
+            "image_size": [self.width, self.height],
+            "ner_source": "LLM_OR_REGEX",
+            "ner_entities": [
+                {
+                    "field": field,
+                    "text": payload.get("text", ""),
+                    "bbox": list(payload.get("bbox", [])) if payload.get("bbox") else None,
+                    "confidence": float(payload.get("confidence", 0.0)),
+                }
+                for field, payload in sorted(self.ner_entities.items())
+            ],
+            "ner_metrics": getattr(self, "ner_metrics", {}),
+        }
+
+        with open(ner_json_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+
+        print(f"[INFO] NER JSON saved → {ner_json_path}")
+        self.log.append(f"- NER JSON saved: {ner_json_path}")
+        return ner_json_path
+
+    def print_ner_fields_summary(self):
+        """Print current NER entity summary to terminal."""
         print("\n[NER FIELDS]")
         for k in sorted(self.ner_entities):
             print(f"  {k:18s}: {self.ner_entities[k]['text']}")
         if self.missing_ner_fields:
             print("  Missing fields:", ", ".join(self.missing_ner_fields))
-        print(f"  NER Recall: {self.ner_metrics['ner_recall']:.2f}")
+            print(f"  NER Recall: {self.ner_metrics.get('ner_recall', 0.0):.2f}")
+
+    def run_llm_ner(self, ocr_json_path):
+        """Run LLM-based NER from OCR JSON; fallback to regex NER on any failure."""
+        enable_llm = os.getenv("ENABLE_LLM_NER", "1").strip().lower() not in {"0", "false", "no"}
+        if not enable_llm:
+            self.log.append("- LLM NER disabled by ENABLE_LLM_NER environment setting.")
+            return
+
+        if self.llm_ner_disabled_reason:
+            self.log.append(f"- LLM NER skipped: {self.llm_ner_disabled_reason}")
+            return
+
+        print("[INFO] Running LLM-based NER extraction")
+        self.log.append("- Running LLM-based NER extraction.")
+        try:
+            from llm_ner_extractor import (
+                extract_passport_fields_llm,
+                LLMNERQuotaError,
+                LLMNERConfigError,
+                LLMNERAuthError,
+                LLMNERTokenLimitError,
+            )
+            llm_entities = extract_passport_fields_llm(ocr_json_path)
+            if not llm_entities:
+                raise ValueError("LLM returned no entities")
+
+            normalized = {}
+            for field, payload in llm_entities.items():
+                bbox = payload.get("bbox")
+                if bbox is None:
+                    bbox = (0, 0, self.width, self.height)
+                normalized[field] = {
+                    "text": str(payload.get("text", "")).strip(),
+                    "bbox": bbox,
+                    "confidence": float(payload.get("confidence", 0.0)),
+                }
+
+            self.ner_entities = {k: v for k, v in normalized.items() if v["text"]}
+            self._update_ner_metrics()
+            print("[INFO] LLM NER detected fields:", ", ".join(sorted(self.ner_entities.keys())) or "None")
+            self.log.append(f"- LLM NER detected fields: {len(self.ner_entities)}")
+        except LLMNERQuotaError as e:
+            self.llm_ner_disabled_reason = "quota exceeded"
+            print(f"[WARNING] LLM NER unavailable due to quota. Using regex NER only. Reason: {e}")
+            self.log.append(f"- LLM NER quota exceeded; regex fallback active: {e}")
+        except LLMNERConfigError as e:
+            self.llm_ner_disabled_reason = "LLM configuration issue"
+            print(f"[WARNING] LLM NER not configured. Using regex NER only. Reason: {e}")
+            self.log.append(f"- LLM NER configuration issue; regex fallback active: {e}")
+        except LLMNERAuthError as e:
+            self.llm_ner_disabled_reason = "LLM authentication failed"
+            print(f"[WARNING] LLM NER authentication failed. Using regex NER only. Reason: {e}")
+            self.log.append(f"- LLM NER authentication failed; regex fallback active: {e}")
+        except LLMNERTokenLimitError as e:
+            print(f"[WARNING] LLM NER token limit reached. Falling back to regex NER. Reason: {e}")
+            self.log.append(f"- LLM NER token/context limit hit; regex fallback active: {e}")
+        except Exception as e:
+            print(f"[WARNING] LLM NER failed. Falling back to regex NER. Reason: {e}")
+            self.log.append(f"- LLM NER failed, fallback regex NER: {e}")
+            # regex baseline already executed in process_document; only recompute if empty
+            if not self.ner_entities:
+                self.identify_critical_entities_from_ocr()
 
 
     def perform_ocr(self):
@@ -667,7 +788,82 @@ class DocumentForgeryDetector:
         except Exception as e:
             self.log.append(f"- PaddleOCR Error: {e}")
             self.ocr_full_text = "OCR ERROR"
-        
+
+    def _parse_date_from_text(self, text):
+        """Parse a date value from OCR text using common ID formats."""
+        if not text:
+            return None
+
+        raw = str(text).upper()
+        # Try extracting a date-shaped substring first to survive OCR label noise.
+        patterns = [
+            r"\b\d{1,2}[\-/\.]\d{1,2}[\-/\.]\d{2,4}\b",
+            r"\b\d{4}[\-/\.]\d{1,2}[\-/\.]\d{1,2}\b",
+            r"\b\d{1,2}\s+[A-Z]{3,9}\s+\d{2,4}\b",
+        ]
+
+        candidates = []
+        for pat in patterns:
+            m = re.search(pat, raw)
+            if m:
+                candidates.append(m.group(0))
+
+        cleaned = re.sub(r"[^0-9A-Z\-/\. ]", " ", raw).strip()
+        cleaned = re.sub(r"\s+", " ", cleaned)
+        candidates.extend([cleaned, cleaned.replace('.', '-'), cleaned.replace('/', '-')])
+
+        formats = (
+            "%d-%m-%Y", "%d-%m-%y", "%Y-%m-%d",
+            "%d/%m/%Y", "%d/%m/%y", "%Y/%m/%d",
+            "%d.%m.%Y", "%d.%m.%y", "%Y.%m.%d",
+            "%d %m %Y", "%d %m %y", "%Y %m %d",
+            "%d %b %Y", "%d %B %Y", "%d %b %y", "%d %B %y",
+        )
+
+        for cand in candidates:
+            cand = cand.strip()
+            for fmt in formats:
+                try:
+                    return datetime.datetime.strptime(cand, fmt).date()
+                except ValueError:
+                    continue
+        return None
+
+    def evaluate_logical_consistency(self):
+        """Check date ordering rules and store critical logical issues."""
+        self.forgery_issues = []
+        dob_raw = self.ner_entities.get("DATE OF BIRTH", {}).get("text", "")
+        doi_raw = self.ner_entities.get("DATE OF ISSUE", {}).get("text", "")
+        doe_raw = self.ner_entities.get("DATE OF EXPIRY", {}).get("text", "")
+
+        dob = self._parse_date_from_text(dob_raw)
+        doi = self._parse_date_from_text(doi_raw)
+        doe = self._parse_date_from_text(doe_raw)
+
+        if dob and doi and dob >= doi:
+            self.forgery_issues.append(
+                f"DATE OF BIRTH ({dob_raw}) is not earlier than DATE OF ISSUE ({doi_raw})."
+            )
+        if doi and doe and doi >= doe:
+            self.forgery_issues.append(
+                f"DATE OF ISSUE ({doi_raw}) is not earlier than DATE OF EXPIRY ({doe_raw})."
+            )
+
+        self.log.append(f"- Logical date checks: {len(self.forgery_issues)} issue(s).")
+        return self.forgery_issues
+
+    def calculate_risk_score(self):
+        """Aggregate anomaly severity into a normalized 0..100 forensic risk score."""
+        char_risk = sum(float(a.get("max_score", 0.0)) for a in self.anomalies)
+        bg_risk = sum(float(a.get("z_score", 0.0)) * 2.0 for a in self.background_anomalies)
+        ocr_risk = sum(float(a.get("max_score", 0.0)) * 2.5 for a in self.ocr_box_anomalies)
+        cluster_risk = sum(float(r.get("severity_proxy", 0.0)) * 1.5 for r in self.suspicious_regions)
+        logic_risk = 20.0 * len(self.forgery_issues)
+
+        raw_risk = char_risk + bg_risk + ocr_risk + cluster_risk + logic_risk
+        self.risk_score = float(min(100.0, raw_risk))
+        self.log.append(f"- Composite risk score: {self.risk_score:.2f}/100")
+        return self.risk_score
     
     def generate_training_features(self):
         """
@@ -678,7 +874,26 @@ class DocumentForgeryDetector:
         # Baseline Character Statistics (Global means and STDs)
         stats = self.baseline_stats if self.baseline_stats else {}
         total_chars = len(self.characters)
-        
+        font_size_variance = float(np.var([c['height'] for c in self.characters])) if self.characters else 0.0
+        ocr_confidence_mean = float(np.mean([b.get('confidence', 0.0) for b in self.ocr_boxes])) if self.ocr_boxes else 0.0
+
+        field_blur_values = []
+        for entity in self.ner_entities.values():
+            bbox = entity.get('bbox')
+            if not bbox or len(bbox) != 4:
+                continue
+            x1, y1, x2, y2 = bbox
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(self.width, x2), min(self.height, y2)
+            if x2 <= x1 or y2 <= y1:
+                continue
+            roi = self.gray_original[y1:y2, x1:x2]
+            if roi.size == 0:
+                continue
+            field_blur_values.append(float(cv2.Laplacian(roi, cv2.CV_64F).var()))
+
+        field_blur_variance = float(np.var(field_blur_values)) if field_blur_values else 0.0
+
         geo_anomalies = sum(
             1 for a in self.anomalies
             if any(t.startswith("GLOBAL") for t in a['types'])
@@ -693,10 +908,10 @@ class DocumentForgeryDetector:
         # Feature Vector Assembly 
         self.forgery_features = {
             'Char_Count': total_chars,
-            'NER_Detected_Count': self.ner_completeness['detected_count']
-                if hasattr(self, 'ner_completeness') else 0,
-            'NER_Completeness_Ratio': self.ner_completeness['completeness_ratio']
-                if hasattr(self, 'ner_completeness') else 0.0,
+            'NER_Detected_Count': self.ner_metrics.get('detected_count', 0)
+                if hasattr(self, 'ner_metrics') else 0,
+            'NER_Completeness_Ratio': self.ner_metrics.get('ner_recall', 0.0)
+                if hasattr(self, 'ner_metrics') else 0.0,
             'H_Mean': stats.get('height_mean', 0), 'H_STD': stats.get('height_std', 0),
             'W_Mean': stats.get('width_mean', 0), 'W_STD': stats.get('width_std', 0),
             'AR_Mean': stats.get('aspect_ratio_mean', 0), 'AR_STD': stats.get('aspect_ratio_std', 0),
@@ -707,25 +922,34 @@ class DocumentForgeryDetector:
             'Ink_Anomaly_Ratio': ink_anomalies / (total_chars + 1e-6),
             'BG_Mean': self.background_stats.get('mean', 0) if self.background_stats else 0,
             'BG_STD': self.background_stats.get('std', 0) if self.background_stats else 0,
+            # Legacy count features kept for backward compatibility with existing datasets/models
             'OCR_Box_Anomalies_Count': len(self.ocr_box_anomalies),
             'BG_Anomaly_Line_Count': len(self.background_anomalies),
             'Clustered_Regions_Count': len(self.suspicious_regions),
+            # New engineered features
+            'Font_Size_Variance': font_size_variance,
+            'OCR_Confidence_Mean': ocr_confidence_mean,
+            'Field_Blur_Variance': field_blur_variance,
+            'Risk_Score': self.calculate_risk_score(),
         }
         
         self.log.append(f"- Feature vector generated with {len(self.forgery_features)} metrics.")
         return self.forgery_features
     
 
-    def process_document(self, char_sensitivity=2.0, bg_sensitivity=3.0, ocr_sensitivity=2.5):
+    def process_document(self, char_sensitivity=2.0, bg_sensitivity=3.0, ocr_sensitivity=2.5, auto_save_png=True):
         """Orchestrates the full detection pipeline with mandatory sequence."""
         try:
             # 1. Start with OCR and Image Preprocessing
             self.perform_ocr()
             self.preprocess_image() 
             
-            # 2. Identify Fields and Values
-            self.identify_critical_entities_from_ocr() 
-            self.save_ocr_json(self.image_path) 
+            # 2. Identify Fields and Values (regex baseline), then LLM-enhanced NER from OCR JSON
+            self.identify_critical_entities_from_ocr(print_summary=False)
+            self.save_ocr_json(self.image_path)
+            self.run_llm_ner(self._ocr_json_output_path(self.image_path))
+            self.save_ner_json(self.image_path)
+            self.print_ner_fields_summary()
 
             # 3. Run physical and OCR box checks
             self.detect_ocr_box_anomalies(sensitivity=ocr_sensitivity)
@@ -734,6 +958,7 @@ class DocumentForgeryDetector:
             self.calculate_background_stats()
             self.detect_background_anomalies(sensitivity=bg_sensitivity)
             self.calculate_baseline_statistics()
+            self.evaluate_logical_consistency()
             
             # 4. Detect anomalies and cluster
             self.detect_anomalies(sensitivity=char_sensitivity)
@@ -742,6 +967,10 @@ class DocumentForgeryDetector:
             # 5. Generate final ML features and final report strings
             self.generate_training_features()
             self.generate_report() # This pre-calculates the verdict
+
+            # 6. Save PNG visualization for every processed file
+            if auto_save_png:
+                self.visualize_results(save_path=default_png_output_path(self.image_path))
 
         except Exception as e:
             self.log.append(f"[FATAL PIPELINE ERROR] {e}")
@@ -829,7 +1058,7 @@ class DocumentForgeryDetector:
 
         # Named Entities (Omitted for brevity, assumed included)
         report.append("Named Entities (scoped fields):")
-        ner_keys_order = ['SURNAME', 'GIVEN NAME', 'NATIONALITY', 'ID CARD NO', 'PLACE OF BIRTH', 'DATE OF BIRTH', 'GENDER', 'DATE OF ISSUE', 'DATE OF EXPIRY', 'SIGNATURE', 'PERSONAL NO', 'AUTHORITY']
+        ner_keys_order = ['SURNAME', 'GIVEN NAME', 'FULL NAME', 'NATIONALITY', 'PASSPORT NO', 'ID CARD NO', 'PERSONAL NO', 'PLACE OF BIRTH', 'DATE OF BIRTH', 'SEX', 'HEIGHT', 'DATE OF ISSUE', 'DATE OF EXPIRY', 'AUTHORITY', 'SIGNATURE', 'MRZ LINE 1', 'MRZ LINE 2']
         detected_keys = [k for k in ner_keys_order if k in self.ner_entities]
         for entity in detected_keys:
             data = self.ner_entities[entity]
@@ -853,16 +1082,16 @@ class DocumentForgeryDetector:
         report.append("-" * 80)
 
         # FINAL VERDICT
-        total_suspicion_score = (len(self.anomalies) * 1) + (len(self.background_anomalies) * 5) + (len(self.ocr_box_anomalies) * 10) + (len(self.suspicious_regions) * 15)
+        risk_score = self.risk_score if self.risk_score else self.calculate_risk_score()
         
         if self.forgery_issues:
             verdict = "**CRITICAL LOGICAL FORGERY**"; confidence = 99.9
             reason = "Critical logical content inconsistencies detected by OCR analysis."
-        elif total_suspicion_score > 50: 
-            verdict = "SUSPICIOUS (ML Ready)"; confidence = min(99.0, 50.0 + total_suspicion_score * 0.5)
-            reason = f"High cumulative heuristic score ({total_suspicion_score}) indicating many physical anomalies. Features ready for full ML classification."
+        elif risk_score > 50:
+            verdict = "SUSPICIOUS (ML Ready)"; confidence = min(99.0, 50.0 + risk_score * 0.5)
+            reason = f"High cumulative risk score ({risk_score:.2f}/100) indicating likely physical anomalies. Features ready for full ML classification."
         else:
-            verdict = "FEATURES COLLECTED (ML Ready)"; confidence = 90.0 - (total_suspicion_score * 0.2)
+            verdict = "FEATURES COLLECTED (ML Ready)"; confidence = 90.0 - (risk_score * 0.2)
             reason = "Feature vector collected. Minimal physical anomalies detected. Document is ready for final classification by the trained model."
             
         self.final_verdict = verdict.strip('*').split('(')[0].strip()
@@ -883,7 +1112,7 @@ class DocumentForgeryDetector:
         """
 
         # Folder creation
-        json_dir = os.path.join("results", "OCR_JSON_results")
+        json_dir = os.path.join("final_results\\results", "OCR_JSON_results")
         os.makedirs(json_dir, exist_ok=True)
 
         image_name = os.path.basename(image_path)
@@ -907,22 +1136,26 @@ class DocumentForgeryDetector:
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4, ensure_ascii=False)
 
-        print(f"[INFO] OCR JSON saved → {json_path}")
+        print(f"\n\n[INFO] OCR JSON saved → {json_path}")
 
 
 def ensure_output_folder():
     """Creates the output folder if it doesn't exist."""
-    folder = "PNG_results"
+    folder = "final_results/PNG_results"
     os.makedirs(folder, exist_ok=True)
     return folder
+
+def default_png_output_path(image_path):
+    """Build default PNG output path for a processed document."""
+    out_folder = ensure_output_folder()
+    doc_name = os.path.splitext(os.path.basename(image_path))[0]
+    return os.path.join(out_folder, f"{doc_name}_analysis.png")
 
 def analyze_single_document(document_path, char_sensitivity=2.0, bg_sensitivity=3.0, ocr_sensitivity=2.5):
     """
     Main function to orchestrate the analysis for a single document.
     """
-    out_folder = ensure_output_folder()
-    doc_name = os.path.splitext(os.path.basename(document_path))[0]
-    output_png = os.path.join(out_folder, f"{doc_name}_enhanced_analysis.PNG")
+    output_png = default_png_output_path(document_path)
 
     print("\n================================================================================")
     print("      STARTING DOCUMENT FORGERY ANALYSIS (AI-ENHANCED)")
@@ -934,13 +1167,14 @@ def analyze_single_document(document_path, char_sensitivity=2.0, bg_sensitivity=
         print(f"\nFATAL ERROR loading document: {e}"); return None
 
     detector.process_document(
-        char_sensitivity=char_sensitivity, bg_sensitivity=bg_sensitivity, ocr_sensitivity=ocr_sensitivity
+        char_sensitivity=char_sensitivity,
+        bg_sensitivity=bg_sensitivity,
+        ocr_sensitivity=ocr_sensitivity,
+        auto_save_png=True,
     )
 
     print(detector.generate_report())
 
-    print("\n[INFO] Generating visualization...")
-    detector.visualize_results(save_path=output_png) 
     print(f"[INFO] Saved visualization to: {output_png}")
     print("================================================================================")
     print("                Analysis Complete!")
@@ -948,86 +1182,89 @@ def analyze_single_document(document_path, char_sensitivity=2.0, bg_sensitivity=
 
     return detector
 
-def generate_datasets(input_dir="input_docs"):
-    out_folder = ensure_output_folder()
-    
-    print("\n[INFO] Initializing shared PaddleOCR Engine...")
-    shared_engine = PaddleOCR(use_angle_cls=True, lang='en', use_gpu=False, show_log=False)
+def extract_country_code(document_name):
+    """Derive a country code prefix from filename (e.g., alb_id_00.jpg -> ALB)."""
+    base = os.path.basename(document_name)
+    code = base.split("_")[0].strip().upper()
+    if not code:
+        return "UNK"
+    return "".join(ch for ch in code if ch.isalnum())[:3] or "UNK"
 
-    image_paths = (
-        glob.glob(os.path.join(input_dir, '*.jpg')) +
-        glob.glob(os.path.join(input_dir, '*.png')) +
-        glob.glob(os.path.join(input_dir, '*.jpeg'))
-    )
-    
-    if not image_paths:
-        print(f"[FATAL ERROR] No images found in '{input_dir}'.")
-        return
+def _normalize_dirs(dirs, default_dir):
+    if dirs is None:
+        return [default_dir]
+    if isinstance(dirs, str):
+        return [dirs]
+    return list(dirs)
 
-    training_data = [] 
-    test_data = []     
-    
-    # Summary Table Counters
+def _collect_image_paths(input_dirs, max_docs=None):
+    image_paths = []
+    for input_dir in input_dirs:
+        image_paths.extend(glob.glob(os.path.join(input_dir, '*.jpg')))
+        image_paths.extend(glob.glob(os.path.join(input_dir, '*.png')))
+        image_paths.extend(glob.glob(os.path.join(input_dir, '*.jpeg')))
+    image_paths = sorted(set(image_paths))
+    if max_docs is not None:
+        return image_paths[:max(0, int(max_docs))]
+    return image_paths  
+
+def _build_feature_rows(image_paths, shared_engine=None, dataset_name="dataset", auto_save_png=True, target_width=1500):
+    rows = []
     summary = {
+        'dataset': dataset_name,
         'total': len(image_paths),
         'success': 0,
         'failed': 0,
         'actual_genuine': 0,
         'actual_forged': 0,
-        'detected_as_forged': 0
+        'detected_as_forged': 0,
+        'country_counts': defaultdict(int)
     }
 
     print(f"=========================================================")
-    print(f"PROCESSING {len(image_paths)} DOCUMENTS FOR DATASETS")
+    print(f"PROCESSING {len(image_paths)} DOCUMENTS FOR {dataset_name.upper()}")
     print(f"=========================================================")
 
-    for i, path in enumerate(image_paths):
+    for path in image_paths:
         doc_name = os.path.basename(path)
-        doc_root = os.path.splitext(doc_name)[0] 
+        doc_root = os.path.splitext(doc_name)[0]
         is_forged = 'fake' in doc_name.lower()
         label = 1 if is_forged else 0
+        country_code = extract_country_code(doc_name)
+        summary['country_counts'][country_code] += 1
 
         if is_forged:
             summary['actual_forged'] += 1
         else:
             summary['actual_genuine'] += 1
 
-
-        print(f"[{i+1}/{len(image_paths)}] Analyzing: {doc_name}")
-        
         try:
-            detector = DocumentForgeryDetector(path, ocr_engine=shared_engine)
+            detector = DocumentForgeryDetector(path, ocr_engine=shared_engine, target_width=target_width)
             detector.is_training_doc = True
             detector.is_forged_gt = is_forged
-            detector.process_document()
-            
-            output_png = os.path.join(out_folder, f"{doc_root}_analysis.png")
-            detector.visualize_results(save_path=output_png)
-            
+
+            detector.process_document(auto_save_png=auto_save_png)
+            if auto_save_png:
+                print(f"   [OK] Saved outputs: final_results/PNG_results/{doc_root}_analysis.png, final_results/results/OCR_JSON_results/{doc_root}.json and final_results/results/NER_JSON_results/{doc_root}.json")
+            else:
+                print(f"   [OK] Saved outputs: final_results/results/OCR_JSON_results/{doc_root}.json and final_results/results/NER_JSON_results/{doc_root}.json")
             if "FORGED" in detector.final_verdict.upper():
                 summary['detected_as_forged'] += 1
 
-            # Prepare features
-            data_row = {'Document_ID': doc_name, 'Label': label}
+            data_row = {'Document_ID': doc_name, 'Label': label, 'Country_Code': country_code}
             data_row.update(detector.forgery_features)
-            
-            training_data.append(data_row)
-            test_data.append(data_row)
-            
-            summary['success'] += 1
+            rows.append(data_row)
 
+            summary['success'] += 1
         except Exception as e:
             print(f"   FAILED to process {doc_name}. Error: {e}")
             summary['failed'] += 1
-            continue
 
-    # Write CSVs
-    if training_data: write_csv(training_data, "ml_training_data.csv")
-    if test_data: write_csv(test_data, "ml_test_data.csv")
+    return rows, summary
 
-    # PRINT SUMMARY TABLE 
+def _print_summary(summary, out_folder, csv_name):
     print("\n" + "="*50)
-    print("         PROCESSING SUMMARY REPORT")
+    print(f"         PROCESSING SUMMARY REPORT ({summary['dataset']})")
     print("="*50)
     print(f" Total Documents Found      : {summary['total']}")
     print(f" Successfully Processed     : {summary['success']}")
@@ -1036,11 +1273,112 @@ def generate_datasets(input_dir="input_docs"):
     print(f" Ground Truth (Genuine)     : {summary['actual_genuine']}")
     print(f" Ground Truth (Forged)      : {summary['actual_forged']}")
     print(f" AI Flagged as Suspicious   : {summary['detected_as_forged']}")
+    print(f" Countries Included         : {dict(summary['country_counts'])}")
     print("-" * 50)
     print(f" Files Saved to             : {out_folder}/")
-    print(f" CSVs Generated             : ml_training_data.csv, ml_test_data.csv")
+    print(f" CSV Generated              : {csv_name}")
     print("="*50 + "\n")
 
+def _empty_summary(dataset_name):
+    return {
+        'dataset': dataset_name,
+        'total': 0,
+        'success': 0,
+        'failed': 0,
+        'actual_genuine': 0,
+        'actual_forged': 0,
+        'detected_as_forged': 0,
+        'country_counts': defaultdict(int),
+    }
+
+
+def _print_overall_summary(summaries):
+    print("\n" + "="*72)
+    print("                 OVERALL DATASET PROCESSING SUMMARY")
+    print("="*72)
+    for summary, csv_name in summaries:
+        print(f"[{summary['dataset']}] -> {csv_name}")
+        print(f"  Total: {summary['total']} | Success: {summary['success']} | Failures: {summary['failed']}")
+        print(f"  Genuine: {summary['actual_genuine']} | Forged: {summary['actual_forged']} | Flagged: {summary['detected_as_forged']}")
+        print(f"  Countries: {dict(summary['country_counts'])}")
+        print("-"*72)
+def generate_datasets(training_dirs=None, validation_dirs=None, test_dirs=None, splits=None, max_docs_per_split=None, auto_save_png=True, target_width=1500):
+    """Generate dataset CSVs for the requested split(s)."""
+    out_folder = ensure_output_folder()
+
+    training_dirs = _normalize_dirs(training_dirs, "training_set")
+    validation_dirs = _normalize_dirs(validation_dirs, "validation_set")
+    test_dirs = _normalize_dirs(test_dirs, "testing_set")
+
+    normalized_splits = [s.lower() for s in (splits or ["training", "validation", "test"])]
+
+    shared_engine = None
+    if PaddleOCR is not None:
+        print("\n[INFO] Initializing shared PaddleOCR Engine...")
+        shared_engine = PaddleOCR(use_angle_cls=True, lang='en', use_gpu=False, show_log=False)
+    else:
+        print("\n[WARNING] PaddleOCR not installed. Running feature extraction without OCR semantics.")
+
+    all_summaries = []
+
+    if "training" in normalized_splits:
+        training_paths = _collect_image_paths(training_dirs, max_docs=max_docs_per_split)
+        if not training_paths:
+            print(f"[FATAL ERROR] No images found for training in: {training_dirs}")
+            return
+        training_data, train_summary = _build_feature_rows(
+            training_paths,
+            shared_engine,
+            dataset_name="Training Set",
+            auto_save_png=auto_save_png,
+            target_width=target_width,
+        )
+        if training_data:
+            write_csv(training_data, "ml_training_data.csv")
+        _print_summary(train_summary, out_folder, "ml_training_data.csv")
+        all_summaries.append((train_summary, "ml_training_data.csv"))
+
+    if "validation" in normalized_splits:
+        validation_paths = _collect_image_paths(validation_dirs, max_docs=max_docs_per_split)
+        if validation_paths:
+            validation_data, validation_summary = _build_feature_rows(
+                validation_paths,
+                shared_engine,
+                dataset_name="Validation Set",
+                auto_save_png=auto_save_png,
+                target_width=target_width,
+            )
+            if validation_data:
+                write_csv(validation_data, "ml_validation_data.csv")
+            _print_summary(validation_summary, out_folder, "ml_validation_data.csv")
+        else:
+            validation_summary = _empty_summary("Validation Set")
+            _print_summary(validation_summary, out_folder, "ml_validation_data.csv")
+        all_summaries.append((validation_summary, "ml_validation_data.csv"))
+
+    if "test" in normalized_splits:
+        test_paths = _collect_image_paths(test_dirs, max_docs=max_docs_per_split)
+        if test_paths:
+            test_data, test_summary = _build_feature_rows(
+                test_paths,
+                shared_engine,
+                dataset_name="Test Set",
+                auto_save_png=auto_save_png,
+                target_width=target_width,
+            )
+            if test_data:
+                write_csv(test_data, "ml_test_data.csv")
+            _print_summary(test_summary, out_folder, "ml_test_data.csv")
+        else:
+            test_summary = _empty_summary("Test Set")
+            _print_summary(test_summary, out_folder, "ml_test_data.csv")
+        all_summaries.append((test_summary, "ml_test_data.csv"))
+
+    if not all_summaries:
+            print("[WARNING] No dataset splits were selected. Use --splits and/or --only-training.")
+            return
+    
+    _print_overall_summary(all_summaries)
 
 def write_csv(data_list, filename):
     """Helper to write dictionary lists to CSV with consistent headers."""
@@ -1052,7 +1390,7 @@ def write_csv(data_list, filename):
         writer.writeheader()
         writer.writerows(data_list)
 
-def cleanup_results_folder(folder_path="PNG_results"):
+def cleanup_results_folder(folder_path="final_results/PNG_results"):
     """Deletes all existing files in the results folder before a new batch run."""
     if os.path.exists(folder_path):
         for filename in os.listdir(folder_path):
@@ -1066,7 +1404,49 @@ def cleanup_results_folder(folder_path="PNG_results"):
 
 if __name__ == "__main__":
 
-    cleanup_results_folder()
-    # Generate ml_training_data.csv
-    generate_datasets()
+    parser = argparse.ArgumentParser(description="Generate document-forgery feature datasets.")
+    parser.add_argument("--training-dirs", nargs="+", default=["datasets/training_set"])
+    parser.add_argument("--validation-dirs", nargs="+", default=["datasets/validation_set"])
+    parser.add_argument("--test-dirs", nargs="+", default=["datasets/testing_set"])
+    parser.add_argument("--splits", nargs="+", choices=["training", "validation", "test"],
+                        default=["training", "validation", "test"],
+                        help="Choose which dataset split(s) to process. Default: training validation test.")
+    parser.add_argument("--only-training", action="store_true",
+                        help="Shortcut for low-cost runs: equivalent to --splits training.")
+    parser.add_argument("--max-docs-per-split", type=int, default=None,
+                        help="Limit each selected split to the first N docs for faster debug loops.")
+    parser.add_argument("--skip-png", action="store_true",
+                        help="Skip saving analysis PNGs to speed up batch runs.")
+    parser.add_argument("--resize-width", type=int, default=1500,
+                        help="Target width for preprocessing; lower values are faster.")
+    parser.add_argument("--quick", action="store_true",
+                        help="Fast debug preset: max 20 docs/split, skip PNGs, resize width 1000.")
+    args = parser.parse_args()
+
+    max_docs = args.max_docs_per_split
+    skip_png = args.skip_png
+    resize_width = args.resize_width
+
+    selected_splits = [s.lower() for s in args.splits]
+    if args.only_training:
+        selected_splits = ["training"]
+
+    if args.quick:
+        max_docs = 20 if max_docs is None else min(max_docs, 20)
+        skip_png = True
+        resize_width = min(resize_width, 1000)
+        print("[INFO] Quick mode enabled: limiting docs, skipping PNGs, and using smaller resize width.")
+
+    if not skip_png:
+        cleanup_results_folder("final_results/PNG_results")
+    cleanup_results_folder("final_results/results")
+    generate_datasets(
+        training_dirs=args.training_dirs,
+        validation_dirs=args.validation_dirs,
+        test_dirs=args.test_dirs,
+        splits=selected_splits,
+        max_docs_per_split=max_docs,
+        auto_save_png=not skip_png,
+        target_width=resize_width,
+    )
     # Run this to generate a single document analysis
