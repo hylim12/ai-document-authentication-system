@@ -28,6 +28,17 @@ def load_dataset(path: str) -> pd.DataFrame:
     missing = sorted(required - set(df.columns))
     if missing:
         raise ValueError(f"Dataset missing required columns: {missing}")
+
+    # Backward compatibility: legacy CSVs may not include the newest engineered features.
+    optional_numeric_defaults = {
+        "Font_Size_Variance": 0.0,
+        "OCR_Confidence_Mean": 0.0,
+        "Field_Blur_Variance": 0.0,
+        "Risk_Score": 0.0,
+    }
+    for col, default in optional_numeric_defaults.items():
+        if col not in df.columns:
+            df[col] = default
     return df
 
 

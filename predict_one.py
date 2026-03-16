@@ -34,7 +34,27 @@ def predict_single_document(image_path):
     feature_dict = detector.forgery_features.copy()
     feature_dict["Country_Code"] = extract_country_code(os.path.basename(image_path))
 
-    X_input = pd.DataFrame([feature_dict])
+    # Backward/forward compatibility: align with model's expected input columns.
+    expected_cols = None
+    try:
+        preprocessor = model.named_steps.get("preprocessor")
+        if preprocessor is not None and hasattr(preprocessor, "feature_names_in_"):
+            expected_cols = list(preprocessor.feature_names_in_)
+    except Exception:
+        expected_cols = None
+
+    if expected_cols:
+        aligned_features = {}
+        for col in expected_cols:
+            if col in feature_dict:
+                aligned_features[col] = feature_dict[col]
+            elif col == "Country_Code":
+                aligned_features[col] = feature_dict["Country_Code"]
+            else:
+                aligned_features[col] = 0.0
+        X_input = pd.DataFrame([aligned_features], columns=expected_cols)
+    else:
+        X_input = pd.DataFrame([feature_dict])
 
     pred_label = int(model.predict(X_input)[0])
     pred_proba = model.predict_proba(X_input)[0]

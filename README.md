@@ -1,4 +1,3 @@
-=== VER 4 ===
 Project Title: AI-Powered Document Authentication for AML Systems
 Developer: Eldeena Lim Huey Yinn
 Supervisor: Prof. Ts. Dr. Tee Connie
@@ -49,6 +48,26 @@ pip install opencv-python paddleocr paddlepaddle scikit-learn pandas matplotlib
   - Filenames should follow <country>_...jpg format (e.g., alb_id_00.jpg, lva_passport_01.jpg, svk_id_02.jpg).
   - The generated CSV now includes Country_Code so the model can generalize across nationalities.
 
+- Faster development loop (recommended during debugging):
+  - Quick preset: `python forged_document_detector.py --quick`
+    - Limits each split to 20 docs
+    - Skips PNG visualization writes
+    - Uses smaller resize width (1000 px)
+  - Custom fast run examples:
+    - `python forged_document_detector.py --max-docs-per-split 10 --skip-png --resize-width 900`
+    - `python forged_document_detector.py --only-training --max-docs-per-split 10 --skip-png --resize-width 900`
+    - `python forged_document_detector.py --splits training --max-docs-per-split 30`
+    - `python forged_document_detector.py --training-dirs datasets/training_set --validation-dirs datasets/validation_set --test-dirs datasets/testing_set --max-docs-per-split 30`
+  - Why this is faster:
+    - OCR + contouring dominate runtime; fewer images + smaller resolution significantly reduce processing time.
+    - PNG rendering/saving is useful for audits but expensive for iterative debugging.
+
+- Dataset optimization tips for speed + model quality:
+  - Keep a tiny `debug subset` per split (e.g., 10–30 images) with both genuine and forged examples.
+  - Balance classes per country when possible (avoid one country or one class dominating).
+  - Remove near-duplicate images from training to reduce unnecessary processing time and overfitting risk.
+  - Keep test set untouched while iterating; only shrink training/validation during rapid experimentation.
+
 - Unseen Evaluation Data: Keep `testing_set` separate from model training and validation and use it for final `ml_test_data.csv` evaluation and `predict_one.py` (single-image inference).
 - Train Model: Run `python ml_model_training.py` to train a country-aware RandomForest model and save:
   - `trained_models/forged_document_rf_model.pkl`
@@ -60,7 +79,27 @@ pip install opencv-python paddleocr paddlepaddle scikit-learn pandas matplotlib
 
 - Output Artifacts per processed file:
   - OCR JSON: `results/OCR_JSON_results/<doc_name>.json`
+  - NER JSON: `results/NER_JSON_results/<doc_name>.json`
   - Visualization PNG: `PNG_results/<doc_name>_analysis.png`
+
+LLM-based NER Configuration (OpenRouter via OpenAI SDK)
+- The LLM NER module uses the OpenAI Python SDK and reads the API key from environment variable `OPENROUTER_API_KEY`.
+- Do NOT hardcode API keys in Python files and do NOT commit keys into the repository.
+
+Setup examples:
+- Linux/macOS (current shell):
+  - `export OPENROUTER_API_KEY="sk-or-..."`
+- Windows PowerShell:
+  - `$env:OPENROUTER_API_KEY="sk-or-..."`
+
+Optional controls:
+- Choose OpenRouter model (recommended for this project):
+  - `export OPENROUTER_MODEL="openai/gpt-oss-120b:free"`
+- Override OpenRouter base URL (optional):
+  - `export OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"`
+- Disable LLM NER explicitly (force regex-only NER):
+  - `export ENABLE_LLM_NER=0`
+
 
 This prototype serves as a Proof of Concept (PoC).
 
