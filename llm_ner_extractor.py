@@ -5,24 +5,28 @@ import json
 import os
 import re
 from typing import Dict, List, Any
+from urllib import error, request
 
 from prompts.passport_ner_prompt import build_passport_ner_prompt
 
-DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_OPENROUTER_MODEL = "openai/gpt-oss-120b:free"
+DEFAULT_LOCAL_LLM_BASE_URL = "http://127.0.0.1:11434"
+DEFAULT_LOCAL_LLM_MODEL = "llama3.2:latest"
 
 class LLMNERQuotaError(RuntimeError):
     """Raised when API quota/billing limits block LLM NER."""
 
-
 class LLMNERConfigError(RuntimeError):
     """Raised when LLM NER is not correctly configured."""
+
+class LLMNERAuthError(RuntimeError):
+    """Raised when provider authentication/authorization blocks LLM NER."""
+
 
 class LLMNERTokenLimitError(RuntimeError):
     """Raised when the LLM request exceeds model context/token limits."""
 
-def _load_key_from_dotenv(dotenv_path: str = ".env") -> str:
-    """Best-effort local .env loader for OPENROUTER_API_KEY."""
+def _load_env_value_from_dotenv(key: str, dotenv_path: str = ".env") -> str:
+    """Best-effort local .env loader for a single environment key."""
     if not os.path.exists(dotenv_path):
         return ""
     try:
@@ -41,15 +45,17 @@ def _load_key_from_dotenv(dotenv_path: str = ".env") -> str:
 
 
 def _resolve_llm_config(default_model: str) -> tuple[str, str, str]:
-    """Resolve API key, base URL and model, preferring OpenRouter settings."""
-    api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
-    if not api_key:
-        api_key = _load_key_from_dotenv()
-    base_url = os.getenv("OPENROUTER_BASE_URL", DEFAULT_OPENROUTER_BASE_URL).strip()
-    model = os.getenv("OPENROUTER_MODEL", default_model).strip() or default_model
+    """Resolve API key (optional), base URL and model for local LLM servers."""
+    base_url = os.getenv("LOCAL_LLM_BASE_URL", "").strip() or _load_env_value_from_dotenv("LOCAL_LLM_BASE_URL")
+    if not base_url:
+        base_url = DEFAULT_LOCAL_LLM_BASE_URL
+
+    model = os.getenv("LOCAL_LLM_MODEL", "").strip() or _load_env_value_from_dotenv("LOCAL_LLM_MODEL")
+    if not model:
+        model = default_model
+
+    api_key = os.getenv("LOCAL_LLM_API_KEY", "").strip() or _load_env_value_from_dotenv("LOCAL_LLM_API_KEY")
     return api_key, base_url, model
-
-
 
 
 def _canonicalize_field_name(field: str) -> str:
@@ -82,8 +88,6 @@ def _canonicalize_field_name(field: str) -> str:
         "PERSONAL NO": "PERSONAL NO",
     }
     return aliases.get(norm, norm)
-
-import re
 
 def _filter_ocr_rows_for_llm(rows):
     """
@@ -235,82 +239,91 @@ def _safe_parse_json(content: str) -> Dict[str, Any]:
     raise json.JSONDecodeError("Failed to parse JSON", content, 0)
 
 
-def _create_ner_completion(client, resolved_model: str, prompt: str):
-    """Create completion, preferring JSON-formatted responses when supported."""
-    base_messages = [
-        {"role": "system", "content": "You are a strict JSON information extraction engine."},
-        {"role": "user", "content": prompt},
-    ]
-
-    common_kwargs = {
+def _create_ner_completion(base_url: str, resolved_model: str, prompt: str, api_key: str = "") -> str:
+    """Create completion against a local Ollama-compatible server and return text content."""
+    endpoint = base_url.rstrip("/") + "/api/chat"
+    payload = {
         "model": resolved_model,
-        "messages": base_messages,
-        "temperature": 0,
-        "max_tokens": 200,
-        "top_p": 1,
+        "stream": False,
+        "format": "json",
+        "messages": [
+            {"role": "system", "content": "You are a strict JSON information extraction engine."},
+            {"role": "user", "content": prompt},
+        ],
+        "options": {
+            "temperature": 0,
+            "top_p": 1,
+            "num_predict": 256,
+        },
     }
 
-    try:
-        return client.chat.completions.create(
-            **common_kwargs,
-            response_format={"type": "json_object"},
-        )
-    except Exception as e:
-        msg = str(e).lower()
-        unsupported = any(token in msg for token in (
-            "response_format",
-            "json_schema",
-            "not supported",
-            "unsupported",
-            "invalid_request_error",
-        ))
-        if unsupported:
-            return client.chat.completions.create(**common_kwargs)
-        raise
+    req = request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            **({"Authorization": f"Bearer {api_key}"} if api_key else {}),
+        },
+        method="POST",
+    )
+    with request.urlopen(req, timeout=120) as resp:
+        body = resp.read().decode("utf-8", errors="replace")
+    parsed = json.loads(body)
+    return parsed.get("message", {}).get("content", "{}")
 
-def extract_passport_fields_llm(ocr_json_path: str, model: str = DEFAULT_OPENROUTER_MODEL) -> Dict[str, Dict[str, Any]]:
-    """Extract dynamic passport/ID entities from OCR JSON using OpenRouter (OpenAI SDK)."""
+
+def extract_passport_fields_llm(ocr_json_path: str, model: str = DEFAULT_LOCAL_LLM_MODEL) -> Dict[str, Dict[str, Any]]:
+    """Extract dynamic passport/ID entities from OCR JSON using a local LLM server (default: Ollama)."""
     api_key, base_url, resolved_model = _resolve_llm_config(model)
-    if not api_key:
-        raise LLMNERConfigError(
-            "OPENROUTER_API_KEY is not set (or .env missing). Configure it to enable LLM NER."
-        )
-
-    # Keep OpenAI import local so the rest of the project can run without SDK installed.
-    try:
-        from openai import OpenAI
-    except ImportError as e:
-        raise LLMNERConfigError(
-            "openai package is not installed. Install it to enable LLM NER."
-        ) from e
 
     ocr_rows = load_ocr_json(ocr_json_path)
-    prompt = build_passport_ner_prompt(ocr_rows)
-
-    client = OpenAI(api_key=api_key, base_url=base_url)
+    filtered_rows = _filter_ocr_rows_for_llm(ocr_rows)
+    prompt = build_passport_ner_prompt(filtered_rows or ocr_rows)
+    
     try:
-        response = _create_ner_completion(client, resolved_model, prompt)
+        content = _create_ner_completion(base_url, resolved_model, prompt, api_key=api_key)
+    except error.URLError as e:
+        raise LLMNERConfigError(
+            "Cannot reach local LLM server. Start Ollama and verify LOCAL_LLM_BASE_URL "
+            f"(current: {base_url})."
+        ) from e
     except Exception as e:
         msg = str(e)
-        if "insufficient_quota" in msg or "Error code: 429" in msg or "quota" in msg.lower():
+        msg_lower = msg.lower()
+
+        if "insufficient_quota" in msg or "error code: 429" in msg_lower or "quota" in msg_lower:
             raise LLMNERQuotaError(
                 "LLM provider quota exceeded (429 insufficient_quota). "
-                "Check billing/plan, or continue with regex fallback."
+
+                "Check provider limits, or continue with regex fallback."
             ) from e
+
+        auth_markers = (
+            "error code: 401",
+            "unauthorized",
+            "invalid api key",
+            "incorrect api key",
+            "forbidden",
+        )
+        if any(marker in msg_lower for marker in auth_markers):
+            raise LLMNERAuthError(
+                "LLM provider authentication failed (401/unauthorized). "
+                "Verify LOCAL_LLM_API_KEY and endpoint access."
+            ) from e
+
         token_limit_markers = (
             "maximum context length",
             "context length exceeded",
             "too many tokens",
             "token limit",
         )
-        if any(marker in msg.lower() for marker in token_limit_markers):
+        if any(marker in msg_lower for marker in token_limit_markers):
             raise LLMNERTokenLimitError(
                 "LLM request exceeded model token/context limits. "
                 "Reduce OCR payload size or use regex fallback."
             ) from e
         raise
-
-    content = response.choices[0].message.content or "{}"
+ 
     payload = _safe_parse_json(content)
     entities = payload.get("entities", [])
 
@@ -338,4 +351,4 @@ def extract_passport_fields_llm(ocr_json_path: str, model: str = DEFAULT_OPENROU
             "confidence": confidence,
         }
 
-    return normalized_entities
+        return normalized_entities

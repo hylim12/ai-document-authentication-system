@@ -688,6 +688,7 @@ class DocumentForgeryDetector:
                 extract_passport_fields_llm,
                 LLMNERQuotaError,
                 LLMNERConfigError,
+                LLMNERAuthError,
                 LLMNERTokenLimitError,
             )
             llm_entities = extract_passport_fields_llm(ocr_json_path)
@@ -714,9 +715,16 @@ class DocumentForgeryDetector:
             print(f"[WARNING] LLM NER unavailable due to quota. Using regex NER only. Reason: {e}")
             self.log.append(f"- LLM NER quota exceeded; regex fallback active: {e}")
         except LLMNERConfigError as e:
-            self.llm_ner_disabled_reason = "missing API key"
+            self.llm_ner_disabled_reason = "LLM configuration issue"
             print(f"[WARNING] LLM NER not configured. Using regex NER only. Reason: {e}")
             self.log.append(f"- LLM NER configuration issue; regex fallback active: {e}")
+        except LLMNERAuthError as e:
+            self.llm_ner_disabled_reason = "LLM authentication failed"
+            print(f"[WARNING] LLM NER authentication failed. Using regex NER only. Reason: {e}")
+            self.log.append(f"- LLM NER authentication failed; regex fallback active: {e}")
+        except LLMNERTokenLimitError as e:
+            print(f"[WARNING] LLM NER token limit reached. Falling back to regex NER. Reason: {e}")
+            self.log.append(f"- LLM NER token/context limit hit; regex fallback active: {e}")
         except Exception as e:
             print(f"[WARNING] LLM NER failed. Falling back to regex NER. Reason: {e}")
             self.log.append(f"- LLM NER failed, fallback regex NER: {e}")
