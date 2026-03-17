@@ -151,6 +151,8 @@ def _canonicalize_field_name(field: str) -> str:
         "PASSPORT NO": "PASSPORT NO",
         "ID CARD NO": "ID CARD NO",
         "PERSONAL NO": "PERSONAL NO",
+        "DOCUMENT TYPE": "DOCUMENT_TYPE",
+        "DOCUMENTTYPE": "DOCUMENT_TYPE",
     }
     return aliases.get(norm, norm)
 
@@ -388,13 +390,13 @@ def _create_ner_completion(base_url: str, resolved_model: str, prompt: str, api_
     )
 
 
-def extract_passport_fields_llm(ocr_json_path: str, model: str = DEFAULT_LOCAL_LLM_MODEL) -> Dict[str, Dict[str, Any]]:
+def extract_passport_fields_llm(ocr_json_path: str, model: str = DEFAULT_LOCAL_LLM_MODEL, regex_entities: Dict[str, Dict[str, Any]] | None = None) -> Dict[str, Dict[str, Any]]:
     """Extract dynamic passport/ID entities from OCR JSON using a local LLM server (default: Ollama)."""
     api_key, base_url, resolved_model = _resolve_llm_config(model)
 
     ocr_rows = load_ocr_json(ocr_json_path)
     filtered_rows = _filter_ocr_rows_for_llm(ocr_rows)
-    prompt = build_passport_ner_prompt(filtered_rows or ocr_rows)
+    prompt = build_passport_ner_prompt(filtered_rows or ocr_rows, regex_entities=regex_entities or {})
     
     try:
         content = _retry_llm_call(

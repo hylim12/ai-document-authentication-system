@@ -705,10 +705,16 @@ class DocumentForgeryDetector:
                 "confidence": float(payload.get("confidence", 0.0)),
             }
 
-        self.ner_entities = {k: v for k, v in normalized.items() if v["text"]}
+        merged = dict(self.ner_entities)
+        for field, payload in normalized.items():
+            if payload.get("text"):
+                merged[field] = payload
+
+        self.ner_entities = {k: v for k, v in merged.items() if str(v.get("text", "")).strip()}
         self._update_ner_metrics()
-        print("[INFO] LLM NER detected fields:", ", ".join(sorted(self.ner_entities.keys())) or "None")
-        self.log.append(f"- LLM NER detected fields: {len(self.ner_entities)}")
+        llm_detected = ", ".join(sorted(normalized.keys())) or "None"
+        print("[INFO] LLM NER detected fields:", llm_detected)
+        self.log.append(f"- LLM NER detected fields: {len(normalized)} (merged total: {len(self.ner_entities)})")
 
     def _finalize_deferred_llm_ner(self):
         """Wait for deferred LLM result only when needed."""
@@ -762,7 +768,8 @@ class DocumentForgeryDetector:
 
         print("[INFO] Running LLM-based NER extraction")
         self.log.append("- Running LLM-based NER extraction.")
-        future = self._llm_executor.submit(extract_passport_fields_llm, ocr_json_path)
+        regex_snapshot = {k: dict(v) for k, v in self.ner_entities.items()}
+        future = self._llm_executor.submit(extract_passport_fields_llm, ocr_json_path, regex_entities=regex_snapshot)
         self._llm_ner_future = future
         try:
             llm_entities = future.result(timeout=8)

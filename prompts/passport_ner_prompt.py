@@ -3,16 +3,28 @@
 import json
 
 
-def build_passport_ner_prompt(ocr_results):
-    """Build a strict JSON extraction prompt from OCR results."""
+def build_passport_ner_prompt(ocr_results, regex_entities=None):
+    """Build a strict JSON extraction prompt from OCR results and optional regex baseline entities."""
     ocr_payload = json.dumps(ocr_results, ensure_ascii=False, indent=2)
+    regex_payload = json.dumps(regex_entities or {}, ensure_ascii=False, indent=2)
 
     return f"""
 You are an expert AI system for extracting structured data from passports and national ID cards used in AML/KYC verification.
 
+You are given:
+1. OCR results
+2. Pre-extracted fields from regex (may be incomplete or slightly incorrect)
+
 Task:
 Analyze OCR text blocks and identify passport or ID fields and their corresponding values.
 Documents may come from different countries and languages.
+
+Your task:
+- Validate and correct pre-extracted fields
+- Fill missing fields
+- Improve confidence
+- Do NOT remove correct fields
+- You MUST extract ALL fields listed when present in OCR
 
 The OCR results contain:
 - text
@@ -180,6 +192,29 @@ RULES
 5. Confidence must be between 0 and 1.
 6. If a field appears multiple times, return the best candidate.
 7. Preserve text exactly as shown in OCR.
+
+--------------------------------------------------
+FEW-SHOT EXAMPLE
+--------------------------------------------------
+
+Example Input OCR:
+[
+  {{"text": "Surname", "bbox": [10, 10, 100, 30], "confidence": 0.99}},
+  {{"text": "Agani", "bbox": [120, 10, 220, 30], "confidence": 0.98}}
+]
+
+Example Output:
+{{
+  "entities": [
+    {{"field": "SURNAME", "text": "Agani", "bbox": [120, 10, 220, 30], "confidence": 0.98}}
+  ]
+}}
+
+--------------------------------------------------
+PRE-EXTRACTED FIELDS (REGEX BASELINE)
+--------------------------------------------------
+
+{regex_payload}
 
 --------------------------------------------------
 OCR DATA
