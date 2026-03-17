@@ -1,11 +1,14 @@
 """LLM-based NER extraction for passport/ID OCR JSON outputs."""
 
 import ast
+import http.client
 import json
 import os
 import re
+import time
 from typing import Dict, List, Any
-from urllib import error, request
+from urllib import error
+from urllib.parse import urlparse
 
 from prompts.passport_ner_prompt import build_passport_ner_prompt
 
@@ -24,6 +27,68 @@ class LLMNERAuthError(RuntimeError):
 
 class LLMNERTokenLimitError(RuntimeError):
     """Raised when the LLM request exceeds model context/token limits."""
+
+
+class _PersistentHTTPJSONClient:
+    """Small keep-alive HTTP client cache for repeated local LLM calls."""
+
+    def __init__(self):
+        self._connections: Dict[tuple[str, str, int], http.client.HTTPConnection] = {}
+
+    def post_json(self, endpoint: str, payload: Dict[str, Any], headers: Dict[str, str], timeout: int = 120) -> Dict[str, Any]:
+        parsed = urlparse(endpoint)
+        scheme = parsed.scheme or "http"
+        host = parsed.hostname
+        if not host:
+            raise LLMNERConfigError(f"Invalid endpoint URL: {endpoint}")
+
+        if parsed.port is not None:
+            port = parsed.port
+        elif scheme == "https":
+            port = 443
+        else:
+            port = 80
+
+        path = parsed.path or "/"
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+
+        key = (scheme, host, port)
+        conn = self._connections.get(key)
+        if conn is None:
+            conn = http.client.HTTPSConnection(host, port, timeout=timeout) if scheme == "https" else http.client.HTTPConnection(host, port, timeout=timeout)
+            self._connections[key] = conn
+
+        body = json.dumps(payload).encode("utf-8")
+        req_headers = {**headers, "Connection": "keep-alive"}
+
+        try:
+            conn.request("POST", path, body=body, headers=req_headers)
+            resp = conn.getresponse()
+            raw = resp.read().decode("utf-8", errors="replace")
+        except Exception:
+            conn.close()
+            self._connections.pop(key, None)
+            raise
+
+        if resp.status >= 400:
+            raise error.HTTPError(endpoint, resp.status, raw[:512], hdrs=None, fp=None)
+
+        return json.loads(raw)
+
+
+_HTTP_CLIENT = _PersistentHTTPJSONClient()
+
+
+def _retry_llm_call(func, retries: int = 3, delay: int = 2):
+    """Retry wrapper with exponential backoff for transient LLM failures."""
+    for attempt in range(retries):
+        try:
+            return func()
+        except Exception:
+            if attempt == retries - 1:
+                raise
+            time.sleep(delay * (2 ** attempt))
 
 def _load_env_value_from_dotenv(key: str, dotenv_path: str = ".env") -> str:
     """Best-effort local .env loader for a single environment key."""
@@ -299,16 +364,8 @@ def _create_ner_completion(base_url: str, resolved_model: str, prompt: str, api_
         
     last_http_error = None
     for endpoint, payload, extract_content in attempts:
-            req = request.Request(
-                endpoint,
-                data=json.dumps(payload).encode("utf-8"),
-                headers=headers,
-                method="POST",
-            )
             try:
-                with request.urlopen(req, timeout=120) as resp:
-                    body = resp.read().decode("utf-8", errors="replace")
-                parsed = json.loads(body)
+                parsed = _HTTP_CLIENT.post_json(endpoint, payload, headers=headers, timeout=120)
                 content = extract_content(parsed)
                 if isinstance(content, str) and content.strip():
                     return content
@@ -340,7 +397,11 @@ def extract_passport_fields_llm(ocr_json_path: str, model: str = DEFAULT_LOCAL_L
     prompt = build_passport_ner_prompt(filtered_rows or ocr_rows)
     
     try:
-        content = _create_ner_completion(base_url, resolved_model, prompt, api_key=api_key)
+        content = _retry_llm_call(
+            lambda: _create_ner_completion(base_url, resolved_model, prompt, api_key=api_key),
+            retries=3,
+            delay=2,
+        )
     except LLMNERConfigError:
         raise
     except error.URLError as e:

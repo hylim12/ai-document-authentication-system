@@ -23,6 +23,7 @@ import glob
 import shutil
 import json
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 try:
     from paddleocr import PaddleOCR
 except ImportError:
@@ -53,6 +54,8 @@ class DocumentForgeryDetector:
         self.image_path = image_path
         self.ocr_engine = ocr_engine
         self.log = []
+        self._llm_executor = ThreadPoolExecutor(max_workers=1)
+        self._llm_ner_future = None
 
         if not os.path.exists(image_path):
             raise FileNotFoundError(f"Image file not found: {image_path}")
@@ -686,48 +689,36 @@ class DocumentForgeryDetector:
             print("  Missing fields:", ", ".join(self.missing_ner_fields))
             print(f"  NER Recall: {self.ner_metrics.get('ner_recall', 0.0):.2f}")
 
-    def run_llm_ner(self, ocr_json_path):
-        """Run LLM-based NER from OCR JSON; fallback to regex NER on any failure."""
-        enable_llm = os.getenv("ENABLE_LLM_NER", "1").strip().lower() not in {"0", "false", "no"}
-        if not enable_llm:
-            self.log.append("- LLM NER disabled by ENABLE_LLM_NER environment setting.")
-            return
+    def _apply_llm_entities(self, llm_entities):
+        """Normalize and apply LLM entities into detector state."""
+        if not llm_entities:
+            raise ValueError("LLM returned no entities")
 
-        if self.llm_ner_disabled_reason:
-            self.log.append(f"- LLM NER skipped: {self.llm_ner_disabled_reason}")
-            return
+        normalized = {}
+        for field, payload in llm_entities.items():
+            bbox = payload.get("bbox")
+            if bbox is None:
+                bbox = (0, 0, self.width, self.height)
+            normalized[field] = {
+                "text": str(payload.get("text", "")).strip(),
+                "bbox": bbox,
+                "confidence": float(payload.get("confidence", 0.0)),
+            }
 
-        if extract_passport_fields_llm is None:
-            self.llm_ner_disabled_reason = "LLM module import failed"
-            print(
-                "[WARNING] LLM NER module unavailable. Using regex NER only. "
-                f"Reason: {LLM_NER_IMPORT_ERROR}"
-            )
-            self.log.append(f"- LLM NER import failed; regex fallback active: {LLM_NER_IMPORT_ERROR}")
+        self.ner_entities = {k: v for k, v in normalized.items() if v["text"]}
+        self._update_ner_metrics()
+        print("[INFO] LLM NER detected fields:", ", ".join(sorted(self.ner_entities.keys())) or "None")
+        self.log.append(f"- LLM NER detected fields: {len(self.ner_entities)}")
+
+    def _finalize_deferred_llm_ner(self):
+        """Wait for deferred LLM result only when needed."""
+        if self._llm_ner_future is None:
             return
-        
-        print("[INFO] Running LLM-based NER extraction")
-        self.log.append("- Running LLM-based NER extraction.")
+        future = self._llm_ner_future
+        self._llm_ner_future = None
         try:
-            llm_entities = extract_passport_fields_llm(ocr_json_path)
-            if not llm_entities:
-                raise ValueError("LLM returned no entities")
-
-            normalized = {}
-            for field, payload in llm_entities.items():
-                bbox = payload.get("bbox")
-                if bbox is None:
-                    bbox = (0, 0, self.width, self.height)
-                normalized[field] = {
-                    "text": str(payload.get("text", "")).strip(),
-                    "bbox": bbox,
-                    "confidence": float(payload.get("confidence", 0.0)),
-                }
-
-            self.ner_entities = {k: v for k, v in normalized.items() if v["text"]}
-            self._update_ner_metrics()
-            print("[INFO] LLM NER detected fields:", ", ".join(sorted(self.ner_entities.keys())) or "None")
-            self.log.append(f"- LLM NER detected fields: {len(self.ner_entities)}")
+            llm_entities = future.result()
+            self._apply_llm_entities(llm_entities)
         except LLMNERQuotaError as e:
             self.llm_ner_disabled_reason = "quota exceeded"
             print(f"[WARNING] LLM NER unavailable due to quota. Using regex NER only. Reason: {e}")
@@ -746,9 +737,40 @@ class DocumentForgeryDetector:
         except Exception as e:
             print(f"[WARNING] LLM NER failed. Falling back to regex NER. Reason: {e}")
             self.log.append(f"- LLM NER failed, fallback regex NER: {e}")
-            # regex baseline already executed in process_document; only recompute if empty
             if not self.ner_entities:
                 self.identify_critical_entities_from_ocr()
+
+    def run_llm_ner(self, ocr_json_path):
+        """Run LLM NER asynchronously with strict early timeout, then defer waiting if needed."""
+        enable_llm = os.getenv("ENABLE_LLM_NER", "1").strip().lower() not in {"0", "false", "no"}
+        if not enable_llm:
+            self.log.append("- LLM NER disabled by ENABLE_LLM_NER environment setting.")
+            return
+
+        if self.llm_ner_disabled_reason:
+            self.log.append(f"- LLM NER skipped: {self.llm_ner_disabled_reason}")
+            return
+
+        if extract_passport_fields_llm is None:
+            self.llm_ner_disabled_reason = "LLM module import failed"
+            print(
+                "[WARNING] LLM NER module unavailable. Using regex NER only. "
+                f"Reason: {LLM_NER_IMPORT_ERROR}"
+            )
+            self.log.append(f"- LLM NER import failed; regex fallback active: {LLM_NER_IMPORT_ERROR}")
+            return
+
+        print("[INFO] Running LLM-based NER extraction")
+        self.log.append("- Running LLM-based NER extraction.")
+        future = self._llm_executor.submit(extract_passport_fields_llm, ocr_json_path)
+        self._llm_ner_future = future
+        try:
+            llm_entities = future.result(timeout=8)
+            self._llm_ner_future = None
+            self._apply_llm_entities(llm_entities)
+        except TimeoutError:
+            print("[INFO] LLM still running in background...")
+            self.log.append("- LLM NER still running in background; deferring wait until needed.")
 
 
     def perform_ocr(self):
@@ -950,8 +972,6 @@ class DocumentForgeryDetector:
             self.identify_critical_entities_from_ocr(print_summary=False)
             self.save_ocr_json(self.image_path)
             self.run_llm_ner(self._ocr_json_output_path(self.image_path))
-            self.save_ner_json(self.image_path)
-            self.print_ner_fields_summary()
 
             # 3. Run physical and OCR box checks
             self.detect_ocr_box_anomalies(sensitivity=ocr_sensitivity)
@@ -966,7 +986,10 @@ class DocumentForgeryDetector:
             self.detect_anomalies(sensitivity=char_sensitivity)
             self.cluster_anomalous_regions()
             
-            # 5. Generate final ML features and final report strings
+            # 5. Finalize deferred LLM NER before persisting NER outputs/features
+            self._finalize_deferred_llm_ner()
+            self.save_ner_json(self.image_path)
+            self.print_ner_fields_summary()
             self.generate_training_features()
             self.generate_report() # This pre-calculates the verdict
 
