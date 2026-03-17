@@ -280,6 +280,75 @@ def _repair_common_json_issues(candidate: str) -> str:
     return repaired
 
 
+def _salvage_entities_from_broken_content(content: str) -> Dict[str, Any] | None:
+    """Best-effort salvage when model returns malformed JSON (e.g., unterminated strings)."""
+    content = _strip_markdown_fences(content)
+    entities: List[Dict[str, Any]] = []
+
+    # List-style payload salvage: {"field": "...", "text": "..."}
+    field_pat = re.compile(r'"field"\s*:\s*"([^"\n]+)"', re.IGNORECASE)
+    text_pat = re.compile(r'"text"\s*:\s*"((?:\\.|[^"\\])*)"', re.IGNORECASE)
+    bbox_pat = re.compile(r'"bbox"\s*:\s*(\[[^\]]*\]|null)', re.IGNORECASE)
+    conf_pat = re.compile(r'"confidence"\s*:\s*([0-9]*\.?[0-9]+)', re.IGNORECASE)
+
+    for m in field_pat.finditer(content):
+        window = content[m.end():m.end() + 500]
+        text_match = text_pat.search(window)
+        if not text_match:
+            continue
+
+        text = bytes(text_match.group(1), "utf-8").decode("unicode_escape", errors="ignore")
+        entity: Dict[str, Any] = {
+            "field": m.group(1).strip(),
+            "text": text.strip(),
+            "bbox": None,
+            "confidence": 0.0,
+        }
+
+        bbox_match = bbox_pat.search(window)
+        if bbox_match and bbox_match.group(1).strip().startswith("["):
+            try:
+                parsed_bbox = json.loads(bbox_match.group(1))
+                if isinstance(parsed_bbox, list) and len(parsed_bbox) == 4:
+                    entity["bbox"] = parsed_bbox
+            except Exception:
+                pass
+
+        conf_match = conf_pat.search(window)
+        if conf_match:
+            try:
+                entity["confidence"] = float(conf_match.group(1))
+            except Exception:
+                pass
+
+        entities.append(entity)
+
+    if entities:
+        # Keep first instance per field to avoid over-capturing malformed fragments.
+        dedup: Dict[str, Dict[str, Any]] = {}
+        for e in entities:
+            if e["field"] not in dedup:
+                dedup[e["field"]] = e
+        return {"entities": list(dedup.values())}
+
+    # Dict-style payload salvage: "FIELD": {"text": "..."}
+    dict_pat = re.compile(
+        r'"([A-Z][A-Z _-]{2,})"\s*:\s*\{[^{}]*?"text"\s*:\s*"((?:\\.|[^"\\])*)"',
+        re.IGNORECASE,
+    )
+    dict_entities = []
+    for m in dict_pat.finditer(content):
+        key = m.group(1).strip()
+        if key.lower() in {"entities", "field", "text", "bbox", "confidence"}:
+            continue
+        text = bytes(m.group(2), "utf-8").decode("unicode_escape", errors="ignore")
+        dict_entities.append({"field": key, "text": text.strip(), "bbox": None, "confidence": 0.0})
+
+    if dict_entities:
+        return {"entities": dict_entities}
+    return None
+
+
 def _safe_parse_json(content: str) -> Dict[str, Any]:
     """Parse JSON content with safe fallbacks for markdown and minor format glitches."""
     content = _strip_markdown_fences(content)
@@ -300,6 +369,10 @@ def _safe_parse_json(content: str) -> Dict[str, Any]:
         python_like = _parse_python_literal_object(attempt)
         if python_like is not None:
             return python_like
+
+    salvaged = _salvage_entities_from_broken_content(content)
+    if salvaged is not None:
+        return salvaged
 
     if last_error is not None:
         raise last_error
