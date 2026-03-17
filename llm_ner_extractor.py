@@ -457,11 +457,43 @@ def extract_passport_fields_llm(ocr_json_path: str, model: str = DEFAULT_LOCAL_L
         raise
  
     payload = _safe_parse_json(content)
-    entities = payload.get("entities", [])
+
+    entities_raw = payload.get("entities", payload)
+    entities_by_field: Dict[str, Dict[str, Any]] = {}
+
+    # Accept both list-style payloads and dict-style payloads from different prompts/models.
+    if isinstance(entities_raw, list):
+        for item in entities_raw:
+            if not isinstance(item, dict):
+                continue
+            field = _canonicalize_field_name(item.get("field", ""))
+            if not field:
+                continue
+            entities_by_field[field] = {
+                "text": item.get("text", ""),
+                "bbox": item.get("bbox"),
+                "confidence": item.get("confidence", 0.0),
+            }
+    elif isinstance(entities_raw, dict):
+        for raw_field, item in entities_raw.items():
+            field = _canonicalize_field_name(raw_field)
+            if not field:
+                continue
+            if isinstance(item, dict):
+                entities_by_field[field] = {
+                    "text": item.get("text", ""),
+                    "bbox": item.get("bbox"),
+                    "confidence": item.get("confidence", 0.0),
+                }
+            else:
+                entities_by_field[field] = {
+                    "text": str(item),
+                    "bbox": None,
+                    "confidence": 0.0,
+                }
 
     normalized_entities: Dict[str, Dict[str, Any]] = {}
-    for item in entities:
-        field = _canonicalize_field_name(item.get("field", ""))
+    for field, item in entities_by_field.items():
         text = str(item.get("text", "")).strip()
         if not field or not text:
             continue
