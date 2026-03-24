@@ -88,6 +88,7 @@ class DocumentForgeryDetector:
         self.forgery_features = {}
         self.forgery_issues = []
         self.risk_score = 0.0
+        self.llm_ner_disabled_reason = None
 
 
 
@@ -503,9 +504,8 @@ class DocumentForgeryDetector:
         used = set()
 
         # Strong regex extraction (country-independent)
-
         for i, box in enumerate(boxes):
-            text = box["norm"]
+            text = box["text"].upper()
 
             # Passport / ID number
             if re.search(r'\b[A-Z0-9]{7,10}\b', text):
@@ -524,12 +524,49 @@ class DocumentForgeryDetector:
             if re.fullmatch(r'[MF]', text):
                 entities["SEX"] = box
 
+            # HEIGHT detection (optional, country-dependent)
+            if re.search(r'\b\d{3}\b', text):
+                near_height_hint = any(
+                    re.search(p, text) for p in [r'HEIGHT', r'TAILLE', r'AUGUMS', r'CM']
+                )
+                if not near_height_hint:
+                    for neighbor in boxes:
+                        if neighbor is box:
+                            continue
+                        ny = y_mid(neighbor["bbox"])
+                        by = y_mid(box["bbox"])
+                        if abs(ny - by) > 35:
+                            continue
+                        if abs(neighbor["bbox"][0] - box["bbox"][0]) > 250:
+                            continue
+                        if any(re.search(p, neighbor["norm"]) for p in [r'HEIGHT', r'TAILLE', r'AUGUMS', r'CM']):
+                            near_height_hint = True
+                            break
+                if near_height_hint and "HEIGHT" not in entities:
+                    entities["HEIGHT"] = box
+
         # MRZ detection
         mrz_lines = [b for b in boxes if "<" in b["text"]]
 
         if len(mrz_lines) >= 2:
             entities["MRZ LINE 1"] = mrz_lines[0]
             entities["MRZ LINE 2"] = mrz_lines[1]
+            if country == "LATVIA":
+                self.log.append("- Country detected: LATVIA (optional HEIGHT expected if present).")
+
+        # Direct label-value pair (vertical pairing) for GIVEN NAME
+        for i, box in enumerate(boxes):
+            if "GIVEN" in box["norm"] or "EMR" in box["norm"]:
+                for j, candidate in enumerate(boxes):
+                    if j == i:
+                        continue
+                    dy = candidate["bbox"][1] - box["bbox"][3]
+                    if 0 <= dy <= 60 and is_valid_for_field("GIVEN NAME", candidate["text"]):
+                        entities["GIVEN NAME"] = candidate
+                        used.add(j)
+                        break
+                if "GIVEN NAME" in entities:
+                    break
 
         # Label Anchor Detection: Locate specific headers to act as geometric reference points.
         label_map = {}
@@ -649,6 +686,55 @@ class DocumentForgeryDetector:
         if "SLOVENSK" in text:
             return "SLOVAKIA"
         return "UNKNOWN"
+
+    def _is_mostly_alpha(self, text):
+        return bool(re.fullmatch(r'[A-Z\s]+', str(text or "")))
+
+    def _is_mostly_numeric(self, text):
+        return bool(re.fullmatch(r'[0-9\-./]+', str(text or "")))
+
+    def _is_alphanumeric_id(self, text):
+        return bool(re.fullmatch(r'[A-Z0-9]{6,}', str(text or "")))
+
+    def _is_valid_for_field(self, field, text):
+        """
+        Validate if a candidate text is suitable for a specific NER field.
+        Prevents wrong assignments like:
+        - 'mbiemri/surname' → ID CARD NO
+        - 'Bulcar,ALB' → DATE OF BIRTH
+        """
+        if not text:
+            return False
+
+        text = str(text).strip().upper()
+
+        if field in ["DATE OF BIRTH", "DATE OF ISSUE", "DATE OF EXPIRY"]:
+            return bool(re.search(r'\b\d{2}[./-]\d{2}[./-]\d{4}\b', text))
+
+        if field in ["ID CARD NO", "PASSPORT NO"]:
+            return bool(re.fullmatch(r'[A-Z0-9]{6,12}', re.sub(r'[^A-Z0-9]', '', text)))
+
+        if field == "SEX":
+            return text in ["M", "F"]
+
+        if field in ["SURNAME", "GIVEN NAME"]:
+            cleaned = re.sub(r'[^A-Z\s]', ' ', text)
+            cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+            return bool(re.fullmatch(r'[A-Z\s]{3,}', cleaned))
+
+        if field == "PERSONAL NO":
+            return bool(re.search(r'\d{6,}', text))
+
+        if field == "PLACE OF BIRTH":
+            return not bool(re.search(r'\d', text))
+
+        if field == "NATIONALITY":
+            return bool(re.fullmatch(r'[A-Z\s/]{3,}', text))
+
+        if field == "HEIGHT":
+            return bool(re.fullmatch(r'\d{3}', text))
+
+        return True
 
     def _ocr_json_output_path(self, image_path):
         """Build OCR JSON path consistent with save_ocr_json output."""
