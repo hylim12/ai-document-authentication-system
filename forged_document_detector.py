@@ -486,6 +486,7 @@ class DocumentForgeryDetector:
             return
 
         def y_mid(b): return (b[1] + b[3]) // 2
+        country = self.detect_country(self.ocr_full_text)
 
         def is_label_like(text):
             for patterns in LABEL_PATTERNS.values():
@@ -554,17 +555,21 @@ class DocumentForgeryDetector:
             for j, box in enumerate(boxes):
                 if j == idx or j in used:
                     continue
+                # Reject label-like text as value
                 if is_label_like(box["norm"]):
+                    continue
+                if not is_valid_for_field(label, box["text"]):
                     continue
                 vy = y_mid(box["bbox"])
                 dx = box["bbox"][0] - ax
-                dy = box["bbox"][1] - anchor["bbox"][3]
-                if not (
-                    (0 < dx < 450 and abs(vy - ay) <= 45) or
-                    (0 <= dy <= 80)
-                ):
+
+                # Strong horizontal preference
+                if dx < 0 or dx > 400:
                     continue
-                score = abs(vy - ay) * 80 + dx
+                if abs(vy - ay) > 40:
+                    continue
+
+                score = dx + (abs(vy - ay) * 200)
                 if score < best_score:
                     best_score = score
                     best_idx = j
@@ -592,32 +597,55 @@ class DocumentForgeryDetector:
 
     def _update_ner_metrics(self):
         """Recompute NER completeness metrics from current ner_entities."""
-        expected_slots = {
-            'SURNAME': {'SURNAME'},
-            'GIVEN NAME': {'GIVEN NAME', 'FULL NAME'},
-            'DATE OF BIRTH': {'DATE OF BIRTH'},
-            'DATE OF ISSUE': {'DATE OF ISSUE'},
-            'DATE OF EXPIRY': {'DATE OF EXPIRY'},
-            'SEX': {'SEX'},
-            'DOCUMENT NO': {'ID CARD NO', 'PASSPORT NO'},
-            'PERSONAL NO': {'PERSONAL NO'},
-            'NATIONALITY': {'NATIONALITY'},
-            'PLACE OF BIRTH': {'PLACE OF BIRTH'},
-            'AUTHORITY': {'AUTHORITY'},
+        core_fields = {
+            'SURNAME',
+            'GIVEN NAME',
+            'DATE OF BIRTH',
+            'DATE OF ISSUE',
+            'DATE OF EXPIRY',
+            'SEX',
+            'DOCUMENT NO',
+        }
+
+        optional_fields = {
+            'HEIGHT',
+            'PERSONAL NO',
+            'NATIONALITY',
+            'PLACE OF BIRTH',
+            'AUTHORITY',
+            'MRZ LINE 1',
+            'MRZ LINE 2',
         }
 
         detected = set(self.ner_entities.keys())
-        detected_slots = {slot for slot, keys in expected_slots.items() if detected & keys}
-        missing_slots = sorted(set(expected_slots.keys()) - detected_slots)
+        normalized_detected = set(detected)
+        if {'ID CARD NO', 'PASSPORT NO'} & detected:
+            normalized_detected.add('DOCUMENT NO')
+
+        detected_core = normalized_detected & core_fields
+        missing_core = core_fields - detected_core
+        detected_optional = sorted(optional_fields & normalized_detected)
 
         self.ner_metrics = {
             "detected_fields": sorted(detected),
-            "missing_fields": missing_slots,
-            "detected_count": len(detected_slots),
-            "expected_count": len(expected_slots),
-            "ner_recall": len(detected_slots) / len(expected_slots)
+            "detected_optional_fields": detected_optional,
+            "missing_core_fields": sorted(missing_core),
+            "detected_core_count": len(detected_core),
+            "core_expected_count": len(core_fields),
+            "ner_recall": len(detected_core) / len(core_fields),
         }
-        self.missing_ner_fields = self.ner_metrics["missing_fields"]
+        self.missing_ner_fields = sorted(missing_core)
+
+    def detect_country(self, ocr_text):
+        """Infer document country hints from OCR text."""
+        text = str(ocr_text or "").upper()
+        if "SHQIP" in text:
+            return "ALBANIA"
+        if "LATVIJA" in text:
+            return "LATVIA"
+        if "SLOVENSK" in text:
+            return "SLOVAKIA"
+        return "UNKNOWN"
 
     def _ocr_json_output_path(self, image_path):
         """Build OCR JSON path consistent with save_ocr_json output."""
@@ -705,6 +733,10 @@ class DocumentForgeryDetector:
                     "confidence": conf,
                     "bbox": (x1, y1, x2, y2)
                 })
+
+            self.ocr_full_text = " ".join(
+                box["text"] for box in self.ocr_boxes if box.get("text")
+            )
 
         except Exception as e:
             self.log.append(f"- PaddleOCR Error: {e}")

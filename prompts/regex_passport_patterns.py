@@ -28,5 +28,8 @@ LABEL_PATTERNS = {
     ],
     "AUTHORITY": [
         r"AUTHORITY", r"AUTOR", r"IESTĀDE"
+    ],
+    "HEIGHT": [
+        r"HEIGHT", r"TAILLE", r"AUGUMS", r"CM"
     ]
 }
