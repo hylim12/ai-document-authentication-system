@@ -536,6 +536,20 @@ class DocumentForgeryDetector:
             self.missing_ner_fields = []
             return
 
+        filtered_boxes = []
+        for box in boxes:
+            if self._is_header_text(box["text"]):
+                continue
+            filtered_boxes.append(box)
+
+        boxes = filtered_boxes
+        self.ocr_boxes = boxes
+        if not boxes:
+            self.ner_entities = {}
+            self.ner_metrics = {}
+            self.missing_ner_fields = []
+            return
+
         def y_mid(b): return (b[1] + b[3]) // 2
         country = self.detect_country(self.ocr_full_text)
         width, height = self.width, self.height
