@@ -757,65 +757,67 @@ class DocumentForgeryDetector:
 
             if "GIVEN NAME" in entities and entities["GIVEN NAME"].get("confidence", 0) < 0.95:
                 del entities["GIVEN NAME"]
-        # DATE assignment using score + vertical ordering to reduce swaps
-        if not all(k in entities for k in ["DATE OF BIRTH", "DATE OF ISSUE", "DATE OF EXPIRY"]):
-            date_candidates = []
-
-            for i, box in enumerate(boxes):
-                if re.search(r'\d{2}[./-]\d{2}[./-]\d{4}', box["text"]):
-                    score = self._score_candidate("DATE", box)
-                    date_candidates.append((score, box))
-
-            # Sort by score
-            date_candidates = sorted(date_candidates, key=lambda x: -x[0])
-
-            if len(date_candidates) >= 3:
-                dates = [b for _, b in date_candidates[:3]]
-
-                # Sort by vertical position
-                dates = sorted(dates, key=lambda b: b["bbox"][1])
-
-                assign_if_valid("DATE OF BIRTH", dates[0])
-                assign_if_valid("DATE OF ISSUE", dates[1])
-                assign_if_valid("DATE OF EXPIRY", dates[2])
-
-        # Direct label-value pair (vertical pairing) for GIVEN NAME
+        # GIVEN NAME (STRONG FIX)
         for i, box in enumerate(boxes):
-            if "GIVEN" in box["norm"] or "EMR" in box["norm"]:
+            if any(k in box["norm"] for k in ["GIVEN", "EMRI", "NAME"]):
                 for j, candidate in enumerate(boxes):
                     if j == i:
                         continue
                     dy = candidate["bbox"][1] - box["bbox"][3]
-                    if 0 <= dy <= 60 and is_valid_for_field("GIVEN NAME", candidate["text"]):
+                    dx = abs(candidate["bbox"][0] - box["bbox"][0])
+                    if 0 <= dy <= 70 and dx <= 120 and is_valid_for_field("GIVEN NAME", candidate["text"]):
                         assign_if_valid("GIVEN NAME", candidate)
                         used.add(j)
                         break
                 if "GIVEN NAME" in entities:
                     break
 
+        # SURNAME (STRONG FIX)
+        for i, box in enumerate(boxes):
+            if any(k in box["norm"] for k in ["SURNAME", "MBIEMR"]):
+                for j, candidate in enumerate(boxes):
+                    if j == i:
+                        continue
+                    dy = candidate["bbox"][1] - box["bbox"][3]
+                    dx = abs(candidate["bbox"][0] - box["bbox"][0])
+                    if 0 <= dy <= 70 and dx <= 120 and is_valid_for_field("SURNAME", candidate["text"]):
+                        assign_if_valid("SURNAME", candidate)
+                        used.add(j)
+                        break
+                if "SURNAME" in entities:
+                    break
+
         for box in boxes:
-            if "/" in box["text"]:
+            text = box["text"].upper()
+
+            if "SIGNATURE" in text or "FIRMA" in text:
+                continue
+
+            if "/" in text and len(text) < 25:
                 assign_if_valid("NATIONALITY", box)
-            elif re.fullmatch(r'[A-Z]{3}', box["text"]):  # MRZ style
+            elif re.fullmatch(r'[A-Z]{3}', text):  # MRZ style
                 assign_if_valid("NATIONALITY", box)
 
         for box in boxes:
             if "," in box["text"] and "ALB" in box["text"]:
                 assign_if_valid("PLACE OF BIRTH", box)
 
-        # AUTHORITY extraction (short uppercase near label)
+        # AUTHORITY (IMPROVED)
         for i, box in enumerate(boxes):
-            if "AUTORIT" in box["norm"] or "AUTHORITY" in box["norm"]:
+            if any(k in box["norm"] for k in ["AUTORIT", "AUTHORITY"]):
                 for j, candidate in enumerate(boxes):
                     if j == i:
                         continue
 
                     dy = candidate["bbox"][1] - box["bbox"][3]
-
-                    if 0 <= dy <= 50:
-                        if re.fullmatch(r'[A-Z]{2,5}', candidate["text"]):
+                    dx = abs(candidate["bbox"][0] - box["bbox"][0])
+                    if 0 <= dy <= 60 and dx <= 150:
+                        text = candidate["text"].strip()
+                        if re.fullmatch(r'[A-Z]{2,5}', text):
                             entities["AUTHORITY"] = candidate
                             break
+                if "AUTHORITY" in entities:
+                    break
 
         if not all(k in entities for k in ["DATE OF BIRTH", "DATE OF ISSUE", "DATE OF EXPIRY"]):
             # STEP 1: Collect ALL date candidates
@@ -898,6 +900,12 @@ class DocumentForgeryDetector:
         # 🚫 FINAL CLEANUP PASS
         for field, data in list(entities.items()):
             if self._is_header_text(data["text"]):
+                del entities[field]
+
+        # 🚫 REMOVE SIGNATURE LEAKS
+        for field, data in list(entities.items()):
+            text = data["text"].upper()
+            if "SIGNATURE" in text or "FIRMA" in text:
                 del entities[field]
 
         # REMOVE HEADER LEAKS
