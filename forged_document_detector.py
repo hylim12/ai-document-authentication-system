@@ -545,6 +545,20 @@ class DocumentForgeryDetector:
             self.missing_ner_fields = []
             return
 
+        filtered_boxes = []
+        for box in boxes:
+            if self._is_header_text(box["text"]):
+                continue
+            filtered_boxes.append(box)
+
+        boxes = filtered_boxes
+        self.ocr_boxes = boxes
+        if not boxes:
+            self.ner_entities = {}
+            self.ner_metrics = {}
+            self.missing_ner_fields = []
+            return
+
         def y_mid(b): return (b[1] + b[3]) // 2
         country = self.detect_country(self.ocr_full_text)
         width, height = self.width, self.height
@@ -743,6 +757,27 @@ class DocumentForgeryDetector:
 
             if "GIVEN NAME" in entities and entities["GIVEN NAME"].get("confidence", 0) < 0.95:
                 del entities["GIVEN NAME"]
+        # DATE assignment using score + vertical ordering to reduce swaps
+        if not all(k in entities for k in ["DATE OF BIRTH", "DATE OF ISSUE", "DATE OF EXPIRY"]):
+            date_candidates = []
+
+            for i, box in enumerate(boxes):
+                if re.search(r'\d{2}[./-]\d{2}[./-]\d{4}', box["text"]):
+                    score = self._score_candidate("DATE", box)
+                    date_candidates.append((score, box))
+
+            # Sort by score
+            date_candidates = sorted(date_candidates, key=lambda x: -x[0])
+
+            if len(date_candidates) >= 3:
+                dates = [b for _, b in date_candidates[:3]]
+
+                # Sort by vertical position
+                dates = sorted(dates, key=lambda b: b["bbox"][1])
+
+                assign_if_valid("DATE OF BIRTH", dates[0])
+                assign_if_valid("DATE OF ISSUE", dates[1])
+                assign_if_valid("DATE OF EXPIRY", dates[2])
 
         # Direct label-value pair (vertical pairing) for GIVEN NAME
         for i, box in enumerate(boxes):
