@@ -488,6 +488,8 @@ class DocumentForgeryDetector:
 
         def y_mid(b): return (b[1] + b[3]) // 2
         country = self.detect_country(self.ocr_full_text)
+        width, height = self.width, self.height
+        header_blacklist = ["REPUBLIK", "ALBANIA", "LETERNJOFTIM"]
 
         def is_label_like(text):
             for patterns in LABEL_PATTERNS.values():
@@ -496,12 +498,25 @@ class DocumentForgeryDetector:
                         return True
             return False
 
+        def get_region(box):
+            x_center = (box["bbox"][0] + box["bbox"][2]) / 2
+            y_center = (box["bbox"][1] + box["bbox"][3]) / 2
+
+            if y_center < height * 0.15:
+                return "HEADER"
+            if y_center > height * 0.8:
+                return "FOOTER"
+            if x_center < width * 0.5:
+                return "LEFT"
+            return "RIGHT"
+
         # Local alias prevents any undefined-name issues in nested matching loops.
         is_valid_for_field = self._is_valid_for_field
 
         # Direct Entity Extraction: Identify fields with distinct, globally unique patterns
         entities = {}
         used = set()
+        used_boxes = set()
 
         def assign_if_valid(field, box):
             if field in entities and entities[field].get("confidence", 0) >= 0.95:
@@ -583,6 +598,13 @@ class DocumentForgeryDetector:
             if country == "LATVIA":
                 self.log.append("- Country detected: LATVIA (optional HEIGHT expected if present).")
 
+        # DATE assignment by vertical order to reduce swaps
+        if date_boxes:
+            sorted_dates = sorted(date_boxes, key=lambda x: x[1]["bbox"][1])
+            date_fields = ["DATE OF BIRTH", "DATE OF ISSUE", "DATE OF EXPIRY"]
+            for field, (idx, date_box) in zip(date_fields, sorted_dates):
+                assign_if_valid(field, date_box, idx)
+
         # Direct label-value pair (vertical pairing) for GIVEN NAME
         for i, box in enumerate(boxes):
             if "GIVEN" in box["norm"] or "EMR" in box["norm"]:
@@ -591,7 +613,7 @@ class DocumentForgeryDetector:
                         continue
                     dy = candidate["bbox"][1] - box["bbox"][3]
                     if 0 <= dy <= 60 and is_valid_for_field("GIVEN NAME", candidate["text"]):
-                        entities["GIVEN NAME"] = candidate
+                        assign_if_valid("GIVEN NAME", candidate, j)
                         used.add(j)
                         break
                 if "GIVEN NAME" in entities:
@@ -690,7 +712,7 @@ class DocumentForgeryDetector:
                     best_idx = j
 
             if best_idx is not None:
-                entities[label] = boxes[best_idx]
+                assign_if_valid(label, boxes[best_idx], best_idx)
                 used.add(best_idx)
 
         # CLEANUP WRONG ASSIGNMENTS
