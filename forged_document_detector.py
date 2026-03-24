@@ -518,7 +518,7 @@ class DocumentForgeryDetector:
         used = set()
         used_boxes = set()
 
-        def assign_if_valid(field, box):
+        def assign_if_valid(field, box, idx=None):
             if field in entities and entities[field].get("confidence", 0) >= 0.95:
                 return
             if self._is_valid_for_field(field, box["text"]):
@@ -583,36 +583,30 @@ class DocumentForgeryDetector:
         # Label-driven date assignment (HIGH PRIORITY)
         for i, box in enumerate(boxes):
             text = box["norm"]
-            if "BIRTH" in text:
+
+            if any(k in text for k in ["BIRTH", "LIND", "NAROD"]):
                 for j, candidate in enumerate(boxes):
-                    if j == i:
-                        continue
                     dy = candidate["bbox"][1] - box["bbox"][3]
-                    if 0 <= dy <= 60 and re.search(r'\b\d{2}[./-]\d{2}[./-]\d{4}\b', candidate["text"]):
-                        assign_if_valid("DATE OF BIRTH", candidate, j)
-                        break
-            elif "ISSUE" in text:
+                    if 0 <= dy <= 60:
+                        assign_if_valid("DATE OF BIRTH", candidate)
+
+            elif any(k in text for k in ["ISSUE", "LESH", "VYD"]):
                 for j, candidate in enumerate(boxes):
-                    if j == i:
-                        continue
                     dy = candidate["bbox"][1] - box["bbox"][3]
-                    if 0 <= dy <= 60 and re.search(r'\b\d{2}[./-]\d{2}[./-]\d{4}\b', candidate["text"]):
-                        assign_if_valid("DATE OF ISSUE", candidate, j)
-                        break
-            elif "EXPIRY" in text:
+                    if 0 <= dy <= 60:
+                        assign_if_valid("DATE OF ISSUE", candidate)
+
+            elif any(k in text for k in ["EXPIRY", "SKAD", "PLAT"]):
                 for j, candidate in enumerate(boxes):
-                    if j == i:
-                        continue
                     dy = candidate["bbox"][1] - box["bbox"][3]
-                    if 0 <= dy <= 60 and re.search(r'\b\d{2}[./-]\d{2}[./-]\d{4}\b', candidate["text"]):
-                        assign_if_valid("DATE OF EXPIRY", candidate, j)
-                        break
+                    if 0 <= dy <= 60:
+                        assign_if_valid("DATE OF EXPIRY", candidate)
 
         # MRZ detection
         mrz_lines = [b for b in boxes if "<" in b["text"] and len(b["text"]) > 20]
 
         if len(mrz_lines) >= 2:
-            mrz_data = self._parse_mrz(mrz_lines[:2])
+            mrz_data = self.parse_mrz_dates(mrz_lines)
 
             for field, value in mrz_data.items():
                 if field not in entities and value:
@@ -627,11 +621,24 @@ class DocumentForgeryDetector:
                 self.log.append("- Country detected: LATVIA (optional HEIGHT expected if present).")
 
         # DATE assignment by vertical order to reduce swaps
-        if date_boxes:
-            sorted_dates = sorted(date_boxes, key=lambda x: x[1]["bbox"][1])
-            date_fields = ["DATE OF BIRTH", "DATE OF ISSUE", "DATE OF EXPIRY"]
-            for field, (idx, date_box) in zip(date_fields, sorted_dates):
-                assign_if_valid(field, date_box, idx)
+        if not all(k in entities for k in ["DATE OF BIRTH", "DATE OF ISSUE", "DATE OF EXPIRY"]):
+            date_boxes = []
+
+            for i, box in enumerate(boxes):
+                if re.search(r'\b\d{2}[./-]\d{2}[./-]\d{4}\b', box["text"]):
+                    date_boxes.append((i, box))
+
+            if len(date_boxes) >= 3:
+                sorted_dates = sorted(date_boxes, key=lambda x: x[1]["bbox"][1])
+
+                if "DATE OF BIRTH" not in entities:
+                    assign_if_valid("DATE OF BIRTH", sorted_dates[0][1])
+
+                if "DATE OF ISSUE" not in entities:
+                    assign_if_valid("DATE OF ISSUE", sorted_dates[1][1])
+
+                if "DATE OF EXPIRY" not in entities:
+                    assign_if_valid("DATE OF EXPIRY", sorted_dates[2][1])
 
         # Direct label-value pair (vertical pairing) for GIVEN NAME
         for i, box in enumerate(boxes):
@@ -641,7 +648,7 @@ class DocumentForgeryDetector:
                         continue
                     dy = candidate["bbox"][1] - box["bbox"][3]
                     if 0 <= dy <= 60 and is_valid_for_field("GIVEN NAME", candidate["text"]):
-                        assign_if_valid("GIVEN NAME", candidate, j)
+                        assign_if_valid("GIVEN NAME", candidate)
                         used.add(j)
                         break
                 if "GIVEN NAME" in entities:
@@ -740,7 +747,7 @@ class DocumentForgeryDetector:
                     best_idx = j
 
             if best_idx is not None:
-                assign_if_valid(label, boxes[best_idx], best_idx)
+                assign_if_valid(label, boxes[best_idx])
                 used.add(best_idx)
 
         # CLEANUP WRONG ASSIGNMENTS
@@ -765,7 +772,24 @@ class DocumentForgeryDetector:
         if print_summary:
             self.print_ner_fields_summary()
 
-    def _parse_mrz(self, mrz_lines):
+    def parse_mrz_dates(self, mrz_lines):
+        try:
+            line2 = mrz_lines[1]
+
+            dob_raw = line2[13:19]
+            expiry_raw = line2[21:27]
+
+            def format_date(d):
+                return f"19{d[0:2]}-{d[2:4]}-{d[4:6]}"
+
+            return {
+                "DATE OF BIRTH": format_date(dob_raw),
+                "DATE OF EXPIRY": format_date(expiry_raw)
+            }
+        except:
+            return {}
+        
+    def mrz_parse_(self, mrz_lines):
         """
         Parse MRZ (TD3 format) and extract structured fields.
         Supports standard passport MRZ with 2 lines.
