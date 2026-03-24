@@ -523,22 +523,13 @@ class DocumentForgeryDetector:
                 label_map[p] = field
 
         def assign_if_valid(field, box, idx=None):
-            text = box["text"]
-
-            # 🚫 BLOCK HEADER TEXT
-            if any(h in text.upper().replace(" ", "") for h in ["REPUBLIK", "ALBANIA", "SHQIP"]):
-                return
-
-            # 🚫 BLOCK LABEL TEXT
-            if is_label_like(box["norm"]):
-                return
-
-            # 🚫 DO NOT OVERWRITE EXISTING (VERY IMPORTANT)
             if field in entities:
+                return  # 🚫 NEVER overwrite
+
+            if not self._is_valid_for_field(field, box["text"]):
                 return
 
-            if self._is_valid_for_field(field, text):
-                entities[field] = box
+            entities[field] = box
 
         # DIRECT LABEL → VALUE EXTRACTION (STRONG)
         for i, box in enumerate(boxes):
@@ -661,25 +652,27 @@ class DocumentForgeryDetector:
             if country == "LATVIA":
                 self.log.append("- Country detected: LATVIA (optional HEIGHT expected if present).")
 
-        # DATE assignment by vertical order to reduce swaps
+        # DATE assignment using score + vertical ordering to reduce swaps
         if not all(k in entities for k in ["DATE OF BIRTH", "DATE OF ISSUE", "DATE OF EXPIRY"]):
-            date_boxes = []
+            date_candidates = []
 
             for i, box in enumerate(boxes):
-                if re.search(r'\b\d{2}[./-]\d{2}[./-]\d{4}\b', box["text"]):
-                    date_boxes.append((i, box))
+                if re.search(r'\d{2}[./-]\d{2}[./-]\d{4}', box["text"]):
+                    score = self._score_candidate("DATE", box)
+                    date_candidates.append((score, box))
 
-            if len(date_boxes) >= 3:
-                sorted_dates = sorted(date_boxes, key=lambda x: x[1]["bbox"][1])
+            # Sort by score
+            date_candidates = sorted(date_candidates, key=lambda x: -x[0])
 
-                if "DATE OF BIRTH" not in entities:
-                    assign_if_valid("DATE OF BIRTH", sorted_dates[0][1])
+            if len(date_candidates) >= 3:
+                dates = [b for _, b in date_candidates[:3]]
 
-                if "DATE OF ISSUE" not in entities:
-                    assign_if_valid("DATE OF ISSUE", sorted_dates[1][1])
+                # Sort by vertical position
+                dates = sorted(dates, key=lambda b: b["bbox"][1])
 
-                if "DATE OF EXPIRY" not in entities:
-                    assign_if_valid("DATE OF EXPIRY", sorted_dates[2][1])
+                assign_if_valid("DATE OF BIRTH", dates[0])
+                assign_if_valid("DATE OF ISSUE", dates[1])
+                assign_if_valid("DATE OF EXPIRY", dates[2])
 
         # Direct label-value pair (vertical pairing) for GIVEN NAME
         for i, box in enumerate(boxes):
@@ -722,7 +715,7 @@ class DocumentForgeryDetector:
             ay, ax = y_mid(anchor["bbox"]), anchor["bbox"][2]
 
             best_idx = None
-            best_score = float("inf")
+            best_score = -999
 
             for j, box in enumerate(boxes):
                 if j == idx or j in used:
@@ -741,8 +734,8 @@ class DocumentForgeryDetector:
                 if abs(vy - ay) > 40:
                     continue
 
-                score = dx + (abs(vy - ay) * 200)
-                if score < best_score:
+                score = self._score_candidate(label, box, anchor)
+                if score > best_score:
                     best_score = score
                     best_idx = j
 
@@ -927,6 +920,85 @@ class DocumentForgeryDetector:
 
     def _is_alphanumeric_id(self, text):
         return bool(re.fullmatch(r'[A-Z0-9]{6,}', str(text or "")))
+
+    def _score_candidate(self, field, candidate, anchor=None):
+        score = 0
+        text = candidate["text"]
+        norm = candidate["norm"]
+        bbox = candidate["bbox"]
+
+        # -------------------------
+        # 1. OCR CONFIDENCE
+        # -------------------------
+        score += candidate.get("confidence", 0) * 2
+
+        # -------------------------
+        # 2. DISTANCE TO LABEL (VERY IMPORTANT)
+        # -------------------------
+        if anchor:
+            ax, ay = anchor["bbox"][0], anchor["bbox"][1]
+            cx, cy = bbox[0], bbox[1]
+
+            dx = abs(cx - ax)
+            dy = abs(cy - ay)
+
+            if dx < 200:
+                score += 2
+            if dy < 50:
+                score += 3
+
+        # -------------------------
+        # 3. FIELD-SPECIFIC RULES
+        # -------------------------
+
+        # NAME
+        if field in ["SURNAME", "GIVEN NAME"]:
+            if len(text.split()) <= 2:
+                score += 2
+            if len(text) < 15:
+                score += 2
+            if "/" in text:
+                score -= 3
+
+        # DATE
+        if "DATE" in field:
+            if re.search(r'\d{2}[./-]\d{2}[./-]\d{4}', text):
+                score += 3
+
+        # ID NUMBER
+        if field in ["ID CARD NO", "PASSPORT NO"]:
+            digits = sum(c.isdigit() for c in text)
+            if digits >= 5:
+                score += 3
+
+        # PERSONAL NO
+        if field == "PERSONAL NO":
+            if re.fullmatch(r'[A-Z]\d+[A-Z]', text):
+                score += 4
+
+        # NATIONALITY
+        if field == "NATIONALITY":
+            if "/" in text:
+                score += 3
+
+        # AUTHORITY
+        if field == "AUTHORITY":
+            if re.fullmatch(r'[A-Z]{2,5}', text):
+                score += 3
+
+        # -------------------------
+        # 4. PENALTIES
+        # -------------------------
+
+        # Header penalty
+        if any(h in norm for h in ["REPUBLIK", "ALBANIA", "SHQIP"]):
+            score -= 10
+
+        # Label penalty
+        if any(re.search(p, norm) for patterns in LABEL_PATTERNS.values() for p in patterns):
+            score -= 5
+
+        return score
 
     def _is_valid_for_field(self, field, text):
         """
