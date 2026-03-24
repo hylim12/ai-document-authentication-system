@@ -495,6 +495,9 @@ class DocumentForgeryDetector:
                         return True
             return False
 
+        # Local alias prevents any undefined-name issues in nested matching loops.
+        is_valid_for_field = self._is_valid_for_field
+
         # Direct Entity Extraction: Identify fields with distinct, globally unique patterns
         entities = {}
         used = set()
