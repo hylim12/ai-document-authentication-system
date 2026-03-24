@@ -580,6 +580,34 @@ class DocumentForgeryDetector:
                 if near_height_hint and "HEIGHT" not in entities:
                     entities["HEIGHT"] = box
 
+        # Label-driven date assignment (HIGH PRIORITY)
+        for i, box in enumerate(boxes):
+            text = box["norm"]
+            if "BIRTH" in text:
+                for j, candidate in enumerate(boxes):
+                    if j == i:
+                        continue
+                    dy = candidate["bbox"][1] - box["bbox"][3]
+                    if 0 <= dy <= 60 and re.search(r'\b\d{2}[./-]\d{2}[./-]\d{4}\b', candidate["text"]):
+                        assign_if_valid("DATE OF BIRTH", candidate, j)
+                        break
+            elif "ISSUE" in text:
+                for j, candidate in enumerate(boxes):
+                    if j == i:
+                        continue
+                    dy = candidate["bbox"][1] - box["bbox"][3]
+                    if 0 <= dy <= 60 and re.search(r'\b\d{2}[./-]\d{2}[./-]\d{4}\b', candidate["text"]):
+                        assign_if_valid("DATE OF ISSUE", candidate, j)
+                        break
+            elif "EXPIRY" in text:
+                for j, candidate in enumerate(boxes):
+                    if j == i:
+                        continue
+                    dy = candidate["bbox"][1] - box["bbox"][3]
+                    if 0 <= dy <= 60 and re.search(r'\b\d{2}[./-]\d{2}[./-]\d{4}\b', candidate["text"]):
+                        assign_if_valid("DATE OF EXPIRY", candidate, j)
+                        break
+
         # MRZ detection
         mrz_lines = [b for b in boxes if "<" in b["text"] and len(b["text"]) > 20]
 
