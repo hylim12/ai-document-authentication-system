@@ -23,29 +23,15 @@ import glob
 import shutil
 import json
 import unicodedata
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from prompts.regex_passport_patterns import LABEL_PATTERNS
 try:
     from paddleocr import PaddleOCR
 except ImportError:
     PaddleOCR = None 
 warnings.filterwarnings('ignore')
 
-try:
-    from llm_ner_extractor import (
-        extract_passport_fields_llm,
-        LLMNERQuotaError,
-        LLMNERConfigError,
-        LLMNERAuthError,
-        LLMNERTokenLimitError,
-    )
-    LLM_NER_IMPORT_ERROR = None
-except Exception as e:
-    extract_passport_fields_llm = None
-    LLMNERQuotaError = RuntimeError
-    LLMNERConfigError = RuntimeError
-    LLMNERAuthError = RuntimeError
-    LLMNERTokenLimitError = RuntimeError
-    LLM_NER_IMPORT_ERROR = e
+# LLM NER removed — using rule-based regex only
+extract_passport_fields_llm = None
 
 class DocumentForgeryDetector:
 
@@ -54,8 +40,6 @@ class DocumentForgeryDetector:
         self.image_path = image_path
         self.ocr_engine = ocr_engine
         self.log = []
-        self._llm_executor = ThreadPoolExecutor(max_workers=1)
-        self._llm_ner_future = None
 
         if not os.path.exists(image_path):
             raise FileNotFoundError(f"Image file not found: {image_path}")
@@ -104,7 +88,6 @@ class DocumentForgeryDetector:
         self.forgery_features = {}
         self.forgery_issues = []
         self.risk_score = 0.0
-        self.llm_ner_disabled_reason = None
 
 
 
@@ -505,52 +488,50 @@ class DocumentForgeryDetector:
         def y_mid(b): return (b[1] + b[3]) // 2
 
         def is_label_like(text):
-            # Determines if a string matches known document field labels.
-            return any(re.search(p, text) for p in (
-                r'MBIEMR', r'SURNAME',
-                r'EMR', r'GIVEN',
-                r'SHTET', r'NATION',
-                r'VEND', r'PLACE',
-                r'DAT', r'DATE',
-                r'NR', r'CARD',
-                r'GJIN', r'SEX',
-                r'PERSONAL',
-                r'AUTOR', r'AUTHOR',
-                r'FIRM', r'SIGN'
-            ))
+            for patterns in LABEL_PATTERNS.values():
+                for p in patterns:
+                    if re.search(p, text):
+                        return True
+            return False
 
         # Direct Entity Extraction: Identify fields with distinct, globally unique patterns
         entities = {}
         used = set()
-        strong_patterns = {
-            "PERSONAL NO": r'[A-Z]\d{7,9}[A-Z]',
-            "ID CARD NO": r'\d{7,10}',
-            "SEX": r'\b[MF]\b'
-        }
+
+        # Strong regex extraction (country-independent)
 
         for i, box in enumerate(boxes):
-            for label, pat in strong_patterns.items():
-                if label in entities:
-                    continue
-                if re.fullmatch(pat, box["norm"]):
-                    entities[label] = box
-                    used.add(i)
+            text = box["norm"]
+
+            # Passport / ID number
+            if re.search(r'\b[A-Z0-9]{7,10}\b', text):
+                entities.setdefault("ID CARD NO", box)
+
+            # Date detection
+            if re.search(r'\b\d{2}[./-]\d{2}[./-]\d{4}\b', text):
+                if "DATE OF BIRTH" not in entities:
+                    entities["DATE OF BIRTH"] = box
+                elif "DATE OF ISSUE" not in entities:
+                    entities["DATE OF ISSUE"] = box
+                elif "DATE OF EXPIRY" not in entities:
+                    entities["DATE OF EXPIRY"] = box
+
+            # Sex detection
+            if re.fullmatch(r'[MF]', text):
+                entities["SEX"] = box
+
+        # MRZ detection
+        mrz_lines = [b for b in boxes if "<" in b["text"]]
+
+        if len(mrz_lines) >= 2:
+            entities["MRZ LINE 1"] = mrz_lines[0]
+            entities["MRZ LINE 2"] = mrz_lines[1]
 
         # Label Anchor Detection: Locate specific headers to act as geometric reference points.
-        label_map = {
-            r'MBIEMR|SURNAME': 'SURNAME',
-            r'EMR|GIVEN': 'GIVEN NAME',
-            r'SHTET|NATION': 'NATIONALITY',
-            r'VEND|PLACE': 'PLACE OF BIRTH',
-            r'LINDJ|BIRTH': 'DATE OF BIRTH',
-            r'LSHIM|ISSUE': 'DATE OF ISSUE',
-            r'SKADIM|EXPIR': 'DATE OF EXPIRY',
-            r'GJIN|SEX': 'SEX',
-            r'LET|CARD': 'ID CARD NO',
-            r'PERSONAL': 'PERSONAL NO',
-            r'AUTOR|AUTHOR': 'AUTHORITY',
-            r'FIRM|SIGN': 'SIGNATURE'
-        }
+        label_map = {}
+        for field, patterns in LABEL_PATTERNS.items():
+            for p in patterns:
+                label_map[p] = field
 
         anchors = []
         for i, box in enumerate(boxes):
@@ -660,7 +641,7 @@ class DocumentForgeryDetector:
         data = {
             "image_name": os.path.basename(image_path),
             "image_size": [self.width, self.height],
-            "ner_source": "LLM_OR_REGEX",
+            "ner_source": "RULE_BASED_REGEX",
             "ner_entities": [
                 {
                     "field": field,
@@ -688,97 +669,6 @@ class DocumentForgeryDetector:
         if self.missing_ner_fields:
             print("  Missing fields:", ", ".join(self.missing_ner_fields))
             print(f"  NER Recall: {self.ner_metrics.get('ner_recall', 0.0):.2f}")
-
-    def _apply_llm_entities(self, llm_entities):
-        """Normalize and apply LLM entities into detector state."""
-        if not llm_entities:
-            raise ValueError("LLM returned no entities")
-
-        normalized = {}
-        for field, payload in llm_entities.items():
-            bbox = payload.get("bbox")
-            if bbox is None:
-                bbox = (0, 0, self.width, self.height)
-            normalized[field] = {
-                "text": str(payload.get("text", "")).strip(),
-                "bbox": bbox,
-                "confidence": float(payload.get("confidence", 0.0)),
-            }
-
-        merged = dict(self.ner_entities)
-        for field, payload in normalized.items():
-            if payload.get("text"):
-                merged[field] = payload
-
-        self.ner_entities = {k: v for k, v in merged.items() if str(v.get("text", "")).strip()}
-        self._update_ner_metrics()
-        llm_detected = ", ".join(sorted(normalized.keys())) or "None"
-        print("[INFO] LLM NER detected fields:", llm_detected)
-        self.log.append(f"- LLM NER detected fields: {len(normalized)} (merged total: {len(self.ner_entities)})")
-
-    def _finalize_deferred_llm_ner(self):
-        """Wait for deferred LLM result only when needed."""
-        if self._llm_ner_future is None:
-            return
-        future = self._llm_ner_future
-        self._llm_ner_future = None
-        try:
-            llm_entities = future.result()
-            self._apply_llm_entities(llm_entities)
-        except LLMNERQuotaError as e:
-            self.llm_ner_disabled_reason = "quota exceeded"
-            print(f"[WARNING] LLM NER unavailable due to quota. Using regex NER only. Reason: {e}")
-            self.log.append(f"- LLM NER quota exceeded; regex fallback active: {e}")
-        except LLMNERConfigError as e:
-            self.llm_ner_disabled_reason = "LLM configuration issue"
-            print(f"[WARNING] LLM NER not configured. Using regex NER only. Reason: {e}")
-            self.log.append(f"- LLM NER configuration issue; regex fallback active: {e}")
-        except LLMNERAuthError as e:
-            self.llm_ner_disabled_reason = "LLM authentication failed"
-            print(f"[WARNING] LLM NER authentication failed. Using regex NER only. Reason: {e}")
-            self.log.append(f"- LLM NER authentication failed; regex fallback active: {e}")
-        except LLMNERTokenLimitError as e:
-            print(f"[WARNING] LLM NER token limit reached. Falling back to regex NER. Reason: {e}")
-            self.log.append(f"- LLM NER token/context limit hit; regex fallback active: {e}")
-        except Exception as e:
-            print(f"[WARNING] LLM NER failed. Falling back to regex NER. Reason: {e}")
-            self.log.append(f"- LLM NER failed, fallback regex NER: {e}")
-            if not self.ner_entities:
-                self.identify_critical_entities_from_ocr()
-
-    def run_llm_ner(self, ocr_json_path):
-        """Run LLM NER asynchronously with strict early timeout, then defer waiting if needed."""
-        enable_llm = os.getenv("ENABLE_LLM_NER", "1").strip().lower() not in {"0", "false", "no"}
-        if not enable_llm:
-            self.log.append("- LLM NER disabled by ENABLE_LLM_NER environment setting.")
-            return
-
-        if self.llm_ner_disabled_reason:
-            self.log.append(f"- LLM NER skipped: {self.llm_ner_disabled_reason}")
-            return
-
-        if extract_passport_fields_llm is None:
-            self.llm_ner_disabled_reason = "LLM module import failed"
-            print(
-                "[WARNING] LLM NER module unavailable. Using regex NER only. "
-                f"Reason: {LLM_NER_IMPORT_ERROR}"
-            )
-            self.log.append(f"- LLM NER import failed; regex fallback active: {LLM_NER_IMPORT_ERROR}")
-            return
-
-        print("[INFO] Running LLM-based NER extraction")
-        self.log.append("- Running LLM-based NER extraction.")
-        regex_snapshot = {k: dict(v) for k, v in self.ner_entities.items()}
-        future = self._llm_executor.submit(extract_passport_fields_llm, ocr_json_path, regex_entities=regex_snapshot)
-        self._llm_ner_future = future
-        try:
-            llm_entities = future.result(timeout=8)
-            self._llm_ner_future = None
-            self._apply_llm_entities(llm_entities)
-        except TimeoutError:
-            print("[INFO] LLM still running in background...")
-            self.log.append("- LLM NER still running in background; deferring wait until needed.")
-
 
     def perform_ocr(self):
         """Initializes and executes the PaddleOCR engine to retrieve raw text and spatial data."""
@@ -975,10 +865,9 @@ class DocumentForgeryDetector:
             self.perform_ocr()
             self.preprocess_image() 
             
-            # 2. Identify Fields and Values (regex baseline), then LLM-enhanced NER from OCR JSON
+            # 2. Identify Fields and Values using rule-based regex NER
             self.identify_critical_entities_from_ocr(print_summary=False)
             self.save_ocr_json(self.image_path)
-            self.run_llm_ner(self._ocr_json_output_path(self.image_path))
 
             # 3. Run physical and OCR box checks
             self.detect_ocr_box_anomalies(sensitivity=ocr_sensitivity)
@@ -993,8 +882,7 @@ class DocumentForgeryDetector:
             self.detect_anomalies(sensitivity=char_sensitivity)
             self.cluster_anomalous_regions()
             
-            # 5. Finalize deferred LLM NER before persisting NER outputs/features
-            self._finalize_deferred_llm_ner()
+            # 5. Persist NER outputs/features
             self.save_ner_json(self.image_path)
             self.print_ner_fields_summary()
             self.generate_training_features()
