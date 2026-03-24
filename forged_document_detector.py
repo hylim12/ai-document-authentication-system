@@ -495,41 +495,6 @@ class DocumentForgeryDetector:
                         return True
             return False
 
-        def is_mostly_alpha(text):
-            return bool(re.fullmatch(r'[A-Z\s]+', text))
-
-        def is_mostly_numeric(text):
-            return bool(re.fullmatch(r'[0-9\-./]+', text))
-
-        def is_alphanumeric_id(text):
-            return bool(re.fullmatch(r'[A-Z0-9]{6,}', text))
-
-        def is_valid_for_field(field, text):
-            text = str(text or "").strip().upper()
-
-            if field in ["DATE OF BIRTH", "DATE OF ISSUE", "DATE OF EXPIRY"]:
-                return bool(re.search(r'\d{2}[./-]\d{2}[./-]\d{4}', text))
-
-            if field in ["ID CARD NO", "PASSPORT NO"]:
-                return is_alphanumeric_id(re.sub(r'[^A-Z0-9]', '', text))
-
-            if field == "SEX":
-                return text in ["M", "F"]
-
-            if field in ["SURNAME", "GIVEN NAME"]:
-                cleaned = re.sub(r'[^A-Z\s]', ' ', text)
-                cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-                return is_mostly_alpha(cleaned) and len(cleaned) > 2
-
-            if field == "PERSONAL NO":
-                return bool(re.search(r'\d{6,}', text))
-
-            if field == "PLACE OF BIRTH":
-                cleaned = re.sub(r'[^0-9\-./]', '', text)
-                return not is_mostly_numeric(cleaned)
-
-            return True
-
         # Direct Entity Extraction: Identify fields with distinct, globally unique patterns
         entities = {}
         used = set()
@@ -537,7 +502,7 @@ class DocumentForgeryDetector:
         # Strong regex extraction (country-independent)
 
         for i, box in enumerate(boxes):
-            text = box["text"].upper()
+            text = box["norm"]
 
             # Passport / ID number
             if re.search(r'\b[A-Z0-9]{7,10}\b', text):
@@ -556,49 +521,12 @@ class DocumentForgeryDetector:
             if re.fullmatch(r'[MF]', text):
                 entities["SEX"] = box
 
-            # HEIGHT detection (optional, country-dependent)
-            if re.search(r'\b\d{3}\b', text):
-                near_height_hint = any(
-                    re.search(p, text) for p in [r'HEIGHT', r'TAILLE', r'AUGUMS', r'CM']
-                )
-                if not near_height_hint:
-                    for neighbor in boxes:
-                        if neighbor is box:
-                            continue
-                        ny = y_mid(neighbor["bbox"])
-                        by = y_mid(box["bbox"])
-                        if abs(ny - by) > 35:
-                            continue
-                        if abs(neighbor["bbox"][0] - box["bbox"][0]) > 250:
-                            continue
-                        if any(re.search(p, neighbor["norm"]) for p in [r'HEIGHT', r'TAILLE', r'AUGUMS', r'CM']):
-                            near_height_hint = True
-                            break
-                if near_height_hint and "HEIGHT" not in entities:
-                    entities["HEIGHT"] = box
-
         # MRZ detection
         mrz_lines = [b for b in boxes if "<" in b["text"]]
 
         if len(mrz_lines) >= 2:
             entities["MRZ LINE 1"] = mrz_lines[0]
             entities["MRZ LINE 2"] = mrz_lines[1]
-            if country == "LATVIA":
-                self.log.append("- Country detected: LATVIA (optional HEIGHT expected if present).")
-
-        # Direct label-value pair (vertical pairing) for GIVEN NAME
-        for i, box in enumerate(boxes):
-            if "GIVEN" in box["norm"] or "EMR" in box["norm"]:
-                for j, candidate in enumerate(boxes):
-                    if j == i:
-                        continue
-                    dy = candidate["bbox"][1] - box["bbox"][3]
-                    if 0 <= dy <= 60 and is_valid_for_field("GIVEN NAME", candidate["text"]):
-                        entities["GIVEN NAME"] = candidate
-                        used.add(j)
-                        break
-                if "GIVEN NAME" in entities:
-                    break
 
         # Label Anchor Detection: Locate specific headers to act as geometric reference points.
         label_map = {}
