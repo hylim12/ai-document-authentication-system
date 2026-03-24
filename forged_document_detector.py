@@ -23,28 +23,15 @@ import glob
 import shutil
 import json
 import unicodedata
+from prompts.regex_passport_patterns import LABEL_PATTERNS
 try:
     from paddleocr import PaddleOCR
 except ImportError:
     PaddleOCR = None 
 warnings.filterwarnings('ignore')
 
-try:
-    from llm_ner_extractor import (
-        extract_passport_fields_llm,
-        LLMNERQuotaError,
-        LLMNERConfigError,
-        LLMNERAuthError,
-        LLMNERTokenLimitError,
-    )
-    LLM_NER_IMPORT_ERROR = None
-except Exception as e:
-    extract_passport_fields_llm = None
-    LLMNERQuotaError = RuntimeError
-    LLMNERConfigError = RuntimeError
-    LLMNERAuthError = RuntimeError
-    LLMNERTokenLimitError = RuntimeError
-    LLM_NER_IMPORT_ERROR = e
+# LLM NER removed — using rule-based regex only
+extract_passport_fields_llm = None
 
 class DocumentForgeryDetector:
 
@@ -500,54 +487,189 @@ class DocumentForgeryDetector:
             return
 
         def y_mid(b): return (b[1] + b[3]) // 2
+        country = self.detect_country(self.ocr_full_text)
+        width, height = self.width, self.height
+        header_blacklist = ["REPUBLIK", "ALBANIA", "LETERNJOFTIM"]
 
         def is_label_like(text):
-            # Determines if a string matches known document field labels.
-            return any(re.search(p, text) for p in (
-                r'MBIEMR', r'SURNAME',
-                r'EMR', r'GIVEN',
-                r'SHTET', r'NATION',
-                r'VEND', r'PLACE',
-                r'DAT', r'DATE',
-                r'NR', r'CARD',
-                r'GJIN', r'SEX',
-                r'PERSONAL',
-                r'AUTOR', r'AUTHOR',
-                r'FIRM', r'SIGN'
-            ))
+            for patterns in LABEL_PATTERNS.values():
+                for p in patterns:
+                    if re.search(p, text):
+                        return True
+            return False
+
+        def get_region(box):
+            x_center = (box["bbox"][0] + box["bbox"][2]) / 2
+            y_center = (box["bbox"][1] + box["bbox"][3]) / 2
+
+            if y_center < height * 0.15:
+                return "HEADER"
+            if y_center > height * 0.8:
+                return "FOOTER"
+            if x_center < width * 0.5:
+                return "LEFT"
+            return "RIGHT"
+
+        # Local alias prevents any undefined-name issues in nested matching loops.
+        is_valid_for_field = self._is_valid_for_field
 
         # Direct Entity Extraction: Identify fields with distinct, globally unique patterns
         entities = {}
         used = set()
-        strong_patterns = {
-            "PERSONAL NO": r'[A-Z]\d{7,9}[A-Z]',
-            "ID CARD NO": r'\d{7,10}',
-            "SEX": r'\b[MF]\b'
-        }
+        used_boxes = set()
 
+        def assign_if_valid(field, box):
+            if field in entities and entities[field].get("confidence", 0) >= 0.95:
+                return
+            if self._is_valid_for_field(field, box["text"]):
+                entities[field] = box
+
+        # Strong regex extraction (country-independent)
         for i, box in enumerate(boxes):
-            for label, pat in strong_patterns.items():
-                if label in entities:
-                    continue
-                if re.fullmatch(pat, box["norm"]):
-                    entities[label] = box
-                    used.add(i)
+            text = box["norm"]
+
+            # -------------------------
+            # ID CARD / PASSPORT NUMBER
+            # -------------------------
+            if re.fullmatch(r'[A-Z0-9]{7,12}', text):
+                assign_if_valid("ID CARD NO", box)
+                used.add(i)
+
+            # -------------------------
+            # PERSONAL NUMBER
+            # -------------------------
+            if re.fullmatch(r'[A-Z]\d{7,9}[A-Z]', text):
+                assign_if_valid("PERSONAL NO", box)
+                used.add(i)
+
+            # -------------------------
+            # DATE
+            # -------------------------
+            if re.search(r'\d{2}[./-]\d{2}[./-]\d{4}', text):
+                if "DATE OF BIRTH" not in entities:
+                    assign_if_valid("DATE OF BIRTH", box)
+                elif "DATE OF ISSUE" not in entities:
+                    assign_if_valid("DATE OF ISSUE", box)
+                elif "DATE OF EXPIRY" not in entities:
+                    assign_if_valid("DATE OF EXPIRY", box)
+
+            # -------------------------
+            # SEX
+            # -------------------------
+            if text in ["M", "F"]:
+                entities["SEX"] = box
+
+            # HEIGHT detection (optional, country-dependent)
+            if re.search(r'\b\d{3}\b', text):
+                near_height_hint = any(
+                    re.search(p, text) for p in [r'HEIGHT', r'TAILLE', r'AUGUMS', r'CM']
+                )
+                if not near_height_hint:
+                    for neighbor in boxes:
+                        if neighbor is box:
+                            continue
+                        ny = y_mid(neighbor["bbox"])
+                        by = y_mid(box["bbox"])
+                        if abs(ny - by) > 35:
+                            continue
+                        if abs(neighbor["bbox"][0] - box["bbox"][0]) > 250:
+                            continue
+                        if any(re.search(p, neighbor["norm"]) for p in [r'HEIGHT', r'TAILLE', r'AUGUMS', r'CM']):
+                            near_height_hint = True
+                            break
+                if near_height_hint and "HEIGHT" not in entities:
+                    entities["HEIGHT"] = box
+
+        # MRZ detection
+        mrz_lines = [b for b in boxes if "<" in b["text"] and len(b["text"]) > 20]
+
+        if len(mrz_lines) >= 2:
+            mrz_data = self._parse_mrz(mrz_lines[:2])
+
+            for field, value in mrz_data.items():
+                if field not in entities and value:
+                    entities[field] = {
+                        "text": value,
+                        "bbox": mrz_lines[0]["bbox"],  # approximate
+                        "confidence": 0.99  # HIGH CONFIDENCE
+                    }
+            entities["MRZ LINE 1"] = mrz_lines[0]
+            entities["MRZ LINE 2"] = mrz_lines[1]
+            if country == "LATVIA":
+                self.log.append("- Country detected: LATVIA (optional HEIGHT expected if present).")
+
+        # DATE assignment by vertical order to reduce swaps
+        if date_boxes:
+            sorted_dates = sorted(date_boxes, key=lambda x: x[1]["bbox"][1])
+            date_fields = ["DATE OF BIRTH", "DATE OF ISSUE", "DATE OF EXPIRY"]
+            for field, (idx, date_box) in zip(date_fields, sorted_dates):
+                assign_if_valid(field, date_box, idx)
+
+        # Direct label-value pair (vertical pairing) for GIVEN NAME
+        for i, box in enumerate(boxes):
+            if "GIVEN" in box["norm"] or "EMR" in box["norm"]:
+                for j, candidate in enumerate(boxes):
+                    if j == i:
+                        continue
+                    dy = candidate["bbox"][1] - box["bbox"][3]
+                    if 0 <= dy <= 60 and is_valid_for_field("GIVEN NAME", candidate["text"]):
+                        assign_if_valid("GIVEN NAME", candidate, j)
+                        used.add(j)
+                        break
+                if "GIVEN NAME" in entities:
+                    break
 
         # Label Anchor Detection: Locate specific headers to act as geometric reference points.
-        label_map = {
-            r'MBIEMR|SURNAME': 'SURNAME',
-            r'EMR|GIVEN': 'GIVEN NAME',
-            r'SHTET|NATION': 'NATIONALITY',
-            r'VEND|PLACE': 'PLACE OF BIRTH',
-            r'LINDJ|BIRTH': 'DATE OF BIRTH',
-            r'LSHIM|ISSUE': 'DATE OF ISSUE',
-            r'SKADIM|EXPIR': 'DATE OF EXPIRY',
-            r'GJIN|SEX': 'SEX',
-            r'LET|CARD': 'ID CARD NO',
-            r'PERSONAL': 'PERSONAL NO',
-            r'AUTOR|AUTHOR': 'AUTHORITY',
-            r'FIRM|SIGN': 'SIGNATURE'
-        }
+        label_map = {}
+        for field, patterns in LABEL_PATTERNS.items():
+            for p in patterns:
+                label_map[p] = field
+
+        # DIRECT LABEL → VALUE EXTRACTION (STRONG)
+        for i, box in enumerate(boxes):
+            for pattern, field in label_map.items():
+                if re.search(pattern, box["norm"]):
+
+                    for j, candidate in enumerate(boxes):
+                        if j == i:
+                            continue
+
+                        dy = candidate["bbox"][1] - box["bbox"][3]
+                        dx = candidate["bbox"][0] - box["bbox"][0]
+
+                        # Prefer directly below or right
+                        if (0 <= dy <= 60) or (0 <= dx <= 200):
+
+                            if is_label_like(candidate["norm"]):
+                                continue
+
+                            if not self._is_valid_for_field(field, candidate["text"]):
+                                continue
+
+                            assign_if_valid(field, candidate)
+                            used.add(j)
+                            break
+
+        # NAME ORDER FIX (Albanian-specific pattern)
+        names = [b for b in boxes if re.fullmatch(r'[A-Z]{3,}', b["norm"])]
+
+        if len(names) >= 2:
+            # Usually: SURNAME first, GIVEN NAME second
+            names_sorted = sorted(names, key=lambda b: b["bbox"][1])
+
+            if "SURNAME" not in entities:
+                entities["SURNAME"] = names_sorted[0]
+
+            if "GIVEN NAME" not in entities:
+                entities["GIVEN NAME"] = names_sorted[1]
+
+        for box in boxes:
+            if "ALBANIAN" in box["norm"] or "SHQIP" in box["norm"]:
+                entities["NATIONALITY"] = box
+
+        for box in boxes:
+            if "," in box["text"] and "ALB" in box["text"]:
+                assign_if_valid("PLACE OF BIRTH", box)
 
         anchors = []
         for i, box in enumerate(boxes):
@@ -558,7 +680,7 @@ class DocumentForgeryDetector:
 
         # Geometric Value Association: Link anchors to adjacent values using a weighted distance cost.
         for idx, label in anchors:
-            if label in entities:
+            if label in entities and entities[label].get("confidence", 0) >= 0.95:
                 continue
 
             anchor = boxes[idx]
@@ -570,24 +692,33 @@ class DocumentForgeryDetector:
             for j, box in enumerate(boxes):
                 if j == idx or j in used:
                     continue
+                # Reject label-like text as value
                 if is_label_like(box["norm"]):
+                    continue
+                if not is_valid_for_field(label, box["text"]):
                     continue
                 vy = y_mid(box["bbox"])
                 dx = box["bbox"][0] - ax
-                dy = box["bbox"][1] - anchor["bbox"][3]
-                if not (
-                    (0 < dx < 450 and abs(vy - ay) <= 45) or
-                    (0 <= dy <= 80)
-                ):
+
+                # Strong horizontal preference
+                if dx < 0 or dx > 400:
                     continue
-                score = abs(vy - ay) * 80 + dx
+                if abs(vy - ay) > 40:
+                    continue
+
+                score = dx + (abs(vy - ay) * 200)
                 if score < best_score:
                     best_score = score
                     best_idx = j
 
             if best_idx is not None:
-                entities[label] = boxes[best_idx]
+                assign_if_valid(label, boxes[best_idx], best_idx)
                 used.add(best_idx)
+
+        # CLEANUP WRONG ASSIGNMENTS
+        for field, data in list(entities.items()):
+            if not self._is_valid_for_field(field, data["text"]):
+                del entities[field]
 
         # Finalize structured Named Entity Recognition (NER) output
         self.ner_entities = {
@@ -606,34 +737,184 @@ class DocumentForgeryDetector:
         if print_summary:
             self.print_ner_fields_summary()
 
+    def _parse_mrz(self, mrz_lines):
+        """
+        Parse MRZ (TD3 format) and extract structured fields.
+        Supports standard passport MRZ with 2 lines.
+        """
+        if len(mrz_lines) < 2:
+            return {}
+
+        line1 = mrz_lines[0]["text"].replace(" ", "")
+        line2 = mrz_lines[1]["text"].replace(" ", "")
+
+        result = {}
+
+        try:
+            # -------------------------
+            # LINE 1 (NAMES)
+            # -------------------------
+            # Format: P<COUNTRYSURNAME<<GIVEN<NAMES
+            parts = line1.split("<<")
+
+            if len(parts) >= 2:
+                surname = parts[0][5:].replace("<", "").strip()
+                given = parts[1].replace("<", " ").strip()
+
+                if surname:
+                    result["SURNAME"] = surname
+                if given:
+                    result["GIVEN NAME"] = given
+
+            # -------------------------
+            # LINE 2 (DATA)
+            # -------------------------
+            # Passport number
+            passport_no = line2[0:9].replace("<", "")
+            if passport_no:
+                result["PASSPORT NO"] = passport_no
+
+            # Nationality
+            nationality = line2[10:13]
+            result["NATIONALITY"] = nationality
+
+            # Date of birth
+            dob = line2[13:19]
+            result["DATE OF BIRTH"] = self._format_mrz_date(dob)
+
+            # Sex
+            sex = line2[20]
+            if sex in ["M", "F"]:
+                result["SEX"] = sex
+
+            # Expiry date
+            expiry = line2[21:27]
+            result["DATE OF EXPIRY"] = self._format_mrz_date(expiry)
+
+        except Exception as e:
+            self.log.append(f"- MRZ parsing failed: {e}")
+
+        return result
+
+    def _format_mrz_date(self, date_str):
+        """
+        Convert YYMMDD → DD-MM-YYYY
+        """
+        try:
+            if len(date_str) != 6:
+                return date_str
+
+            year = int(date_str[:2])
+            month = date_str[2:4]
+            day = date_str[4:6]
+
+            # Handle century
+            year += 1900 if year > 30 else 2000
+
+            return f"{day}-{month}-{year}"
+        except Exception:
+            return date_str
+
     def _update_ner_metrics(self):
         """Recompute NER completeness metrics from current ner_entities."""
-        expected_slots = {
-            'SURNAME': {'SURNAME'},
-            'GIVEN NAME': {'GIVEN NAME', 'FULL NAME'},
-            'DATE OF BIRTH': {'DATE OF BIRTH'},
-            'DATE OF ISSUE': {'DATE OF ISSUE'},
-            'DATE OF EXPIRY': {'DATE OF EXPIRY'},
-            'SEX': {'SEX'},
-            'DOCUMENT NO': {'ID CARD NO', 'PASSPORT NO'},
-            'PERSONAL NO': {'PERSONAL NO'},
-            'NATIONALITY': {'NATIONALITY'},
-            'PLACE OF BIRTH': {'PLACE OF BIRTH'},
-            'AUTHORITY': {'AUTHORITY'},
+        core_fields = {
+            'SURNAME',
+            'GIVEN NAME',
+            'DATE OF BIRTH',
+            'DATE OF ISSUE',
+            'DATE OF EXPIRY',
+            'SEX',
+            'DOCUMENT NO',
+            'PERSONAL NO',
+            'NATIONALITY',
+            'PLACE OF BIRTH',
+            'AUTHORITY',
+        }
+
+        optional_fields = {
+            'HEIGHT',
+            'MRZ LINE 1',
+            'MRZ LINE 2',
         }
 
         detected = set(self.ner_entities.keys())
-        detected_slots = {slot for slot, keys in expected_slots.items() if detected & keys}
-        missing_slots = sorted(set(expected_slots.keys()) - detected_slots)
+        normalized_detected = set(detected)
+        if {'ID CARD NO', 'PASSPORT NO'} & detected:
+            normalized_detected.add('DOCUMENT NO')
+
+        detected_core = normalized_detected & core_fields
+        missing_core = core_fields - detected_core
+        detected_optional = sorted(optional_fields & normalized_detected)
 
         self.ner_metrics = {
             "detected_fields": sorted(detected),
-            "missing_fields": missing_slots,
-            "detected_count": len(detected_slots),
-            "expected_count": len(expected_slots),
-            "ner_recall": len(detected_slots) / len(expected_slots)
+            "detected_optional_fields": detected_optional,
+            "missing_core_fields": sorted(missing_core),
+            "detected_core_count": len(detected_core),
+            "core_expected_count": len(core_fields),
+            "ner_recall": len(detected_core) / len(core_fields),
         }
-        self.missing_ner_fields = self.ner_metrics["missing_fields"]
+        self.missing_ner_fields = sorted(missing_core)
+
+    def detect_country(self, ocr_text):
+        """Infer document country hints from OCR text."""
+        text = str(ocr_text or "").upper()
+        if "SHQIP" in text:
+            return "ALBANIA"
+        if "LATVIJA" in text:
+            return "LATVIA"
+        if "SLOVENSK" in text:
+            return "SLOVAKIA"
+        return "UNKNOWN"
+
+    def _is_mostly_alpha(self, text):
+        return bool(re.fullmatch(r'[A-Z\s]+', str(text or "")))
+
+    def _is_mostly_numeric(self, text):
+        return bool(re.fullmatch(r'[0-9\-./]+', str(text or "")))
+
+    def _is_alphanumeric_id(self, text):
+        return bool(re.fullmatch(r'[A-Z0-9]{6,}', str(text or "")))
+
+    def _is_valid_for_field(self, field, text):
+        """
+        Validate if a candidate text is suitable for a specific NER field.
+        Prevents wrong assignments like:
+        - 'mbiemri/surname' → ID CARD NO
+        - 'Bulcar,ALB' → DATE OF BIRTH
+        """
+        if not text:
+            return False
+
+        text = str(text).strip().upper()
+
+        if field in ["DATE OF BIRTH", "DATE OF ISSUE", "DATE OF EXPIRY"]:
+            return bool(re.search(r'\b\d{2}[./-]\d{2}[./-]\d{4}\b', text))
+
+        if field in ["ID CARD NO", "PASSPORT NO"]:
+            return bool(re.fullmatch(r'[A-Z0-9]{6,12}', re.sub(r'[^A-Z0-9]', '', text)))
+
+        if field == "SEX":
+            return text in ["M", "F"]
+
+        if field in ["SURNAME", "GIVEN NAME"]:
+            cleaned = re.sub(r'[^A-Z\s]', ' ', text)
+            cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+            return bool(re.fullmatch(r'[A-Z\s]{3,}', cleaned))
+
+        if field == "PERSONAL NO":
+            return bool(re.search(r'\d{6,}', text))
+
+        if field == "PLACE OF BIRTH":
+            return not bool(re.search(r'\d', text))
+
+        if field == "NATIONALITY":
+            return bool(re.fullmatch(r'[A-Z\s/]{3,}', text))
+
+        if field == "HEIGHT":
+            return bool(re.fullmatch(r'\d{3}', text))
+
+        return True
 
     def _ocr_json_output_path(self, image_path):
         """Build OCR JSON path consistent with save_ocr_json output."""
@@ -657,7 +938,7 @@ class DocumentForgeryDetector:
         data = {
             "image_name": os.path.basename(image_path),
             "image_size": [self.width, self.height],
-            "ner_source": "LLM_OR_REGEX",
+            "ner_source": "RULE_BASED_REGEX",
             "ner_entities": [
                 {
                     "field": field,
@@ -685,71 +966,6 @@ class DocumentForgeryDetector:
         if self.missing_ner_fields:
             print("  Missing fields:", ", ".join(self.missing_ner_fields))
             print(f"  NER Recall: {self.ner_metrics.get('ner_recall', 0.0):.2f}")
-
-    def run_llm_ner(self, ocr_json_path):
-        """Run LLM-based NER from OCR JSON; fallback to regex NER on any failure."""
-        enable_llm = os.getenv("ENABLE_LLM_NER", "1").strip().lower() not in {"0", "false", "no"}
-        if not enable_llm:
-            self.log.append("- LLM NER disabled by ENABLE_LLM_NER environment setting.")
-            return
-
-        if self.llm_ner_disabled_reason:
-            self.log.append(f"- LLM NER skipped: {self.llm_ner_disabled_reason}")
-            return
-
-        if extract_passport_fields_llm is None:
-            self.llm_ner_disabled_reason = "LLM module import failed"
-            print(
-                "[WARNING] LLM NER module unavailable. Using regex NER only. "
-                f"Reason: {LLM_NER_IMPORT_ERROR}"
-            )
-            self.log.append(f"- LLM NER import failed; regex fallback active: {LLM_NER_IMPORT_ERROR}")
-            return
-        
-        print("[INFO] Running LLM-based NER extraction")
-        self.log.append("- Running LLM-based NER extraction.")
-        try:
-            llm_entities = extract_passport_fields_llm(ocr_json_path)
-            if not llm_entities:
-                raise ValueError("LLM returned no entities")
-
-            normalized = {}
-            for field, payload in llm_entities.items():
-                bbox = payload.get("bbox")
-                if bbox is None:
-                    bbox = (0, 0, self.width, self.height)
-                normalized[field] = {
-                    "text": str(payload.get("text", "")).strip(),
-                    "bbox": bbox,
-                    "confidence": float(payload.get("confidence", 0.0)),
-                }
-
-            self.ner_entities = {k: v for k, v in normalized.items() if v["text"]}
-            self._update_ner_metrics()
-            print("[INFO] LLM NER detected fields:", ", ".join(sorted(self.ner_entities.keys())) or "None")
-            self.log.append(f"- LLM NER detected fields: {len(self.ner_entities)}")
-        except LLMNERQuotaError as e:
-            self.llm_ner_disabled_reason = "quota exceeded"
-            print(f"[WARNING] LLM NER unavailable due to quota. Using regex NER only. Reason: {e}")
-            self.log.append(f"- LLM NER quota exceeded; regex fallback active: {e}")
-        except LLMNERConfigError as e:
-            self.llm_ner_disabled_reason = "LLM configuration issue"
-            print(f"[WARNING] LLM NER not configured. Using regex NER only. Reason: {e}")
-            self.log.append(f"- LLM NER configuration issue; regex fallback active: {e}")
-        except LLMNERAuthError as e:
-            self.llm_ner_disabled_reason = "LLM authentication failed"
-            print(f"[WARNING] LLM NER authentication failed. Using regex NER only. Reason: {e}")
-            self.log.append(f"- LLM NER authentication failed; regex fallback active: {e}")
-        except LLMNERTokenLimitError as e:
-            print(f"[WARNING] LLM NER token limit reached. Falling back to regex NER. Reason: {e}")
-            self.log.append(f"- LLM NER token/context limit hit; regex fallback active: {e}")
-        except Exception as e:
-            print(f"[WARNING] LLM NER failed. Falling back to regex NER. Reason: {e}")
-            self.log.append(f"- LLM NER failed, fallback regex NER: {e}")
-            # regex baseline already executed in process_document; only recompute if empty
-            if not self.ner_entities:
-                self.identify_critical_entities_from_ocr()
-
 
     def perform_ocr(self):
         """Initializes and executes the PaddleOCR engine to retrieve raw text and spatial data."""
@@ -786,6 +1002,10 @@ class DocumentForgeryDetector:
                     "confidence": conf,
                     "bbox": (x1, y1, x2, y2)
                 })
+
+            self.ocr_full_text = " ".join(
+                box["text"] for box in self.ocr_boxes if box.get("text")
+            )
 
         except Exception as e:
             self.log.append(f"- PaddleOCR Error: {e}")
@@ -946,12 +1166,9 @@ class DocumentForgeryDetector:
             self.perform_ocr()
             self.preprocess_image() 
             
-            # 2. Identify Fields and Values (regex baseline), then LLM-enhanced NER from OCR JSON
+            # 2. Identify Fields and Values using rule-based regex NER
             self.identify_critical_entities_from_ocr(print_summary=False)
             self.save_ocr_json(self.image_path)
-            self.run_llm_ner(self._ocr_json_output_path(self.image_path))
-            self.save_ner_json(self.image_path)
-            self.print_ner_fields_summary()
 
             # 3. Run physical and OCR box checks
             self.detect_ocr_box_anomalies(sensitivity=ocr_sensitivity)
@@ -966,7 +1183,9 @@ class DocumentForgeryDetector:
             self.detect_anomalies(sensitivity=char_sensitivity)
             self.cluster_anomalous_regions()
             
-            # 5. Generate final ML features and final report strings
+            # 5. Persist NER outputs/features
+            self.save_ner_json(self.image_path)
+            self.print_ner_fields_summary()
             self.generate_training_features()
             self.generate_report() # This pre-calculates the verdict
 
