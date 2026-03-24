@@ -518,45 +518,13 @@ class DocumentForgeryDetector:
         used = set()
         used_boxes = set()
 
-        def assign_if_valid(field, box, idx=None):
+        def assign_if_valid(field, box):
             if field in entities and entities[field].get("confidence", 0) >= 0.95:
                 return
-            if idx is not None and idx in used_boxes:
-                return
-            text = str(box.get("text", "")).strip()
-            norm = str(box.get("norm", "")).strip()
-            region = get_region(box)
-
-            if region == "HEADER":
-                return
-
-            if any(word in norm for word in header_blacklist):
-                return
-
-            # Region constraints for structured ID layouts
-            if field in ["SURNAME", "GIVEN NAME", "NATIONALITY"] and region != "LEFT":
-                return
-            if field in ["ID CARD NO", "PERSONAL NO", "SEX"] and region != "RIGHT":
-                return
-            if field == "AUTHORITY" and region != "FOOTER":
-                return
-
-            # Field-level strong rules
-            if field == "AUTHORITY" and not re.fullmatch(r'[A-Z]{2,5}', norm):
-                return
-            if field in ["SURNAME", "GIVEN NAME"]:
-                if "/" in text or len(re.sub(r'[^A-Z]', '', norm)) < 3:
-                    return
-            if field == "NATIONALITY" and "/" not in text and box.get("confidence", 0) < 0.95:
-                return
-
             if self._is_valid_for_field(field, box["text"]):
                 entities[field] = box
-                if idx is not None:
-                    used_boxes.add(idx)
 
         # Strong regex extraction (country-independent)
-        date_boxes = []
         for i, box in enumerate(boxes):
             text = box["norm"]
 
@@ -564,27 +532,32 @@ class DocumentForgeryDetector:
             # ID CARD / PASSPORT NUMBER
             # -------------------------
             if re.fullmatch(r'[A-Z0-9]{7,12}', text):
-                assign_if_valid("ID CARD NO", box, i)
+                assign_if_valid("ID CARD NO", box)
                 used.add(i)
 
             # -------------------------
             # PERSONAL NUMBER
             # -------------------------
             if re.fullmatch(r'[A-Z]\d{7,9}[A-Z]', text):
-                assign_if_valid("PERSONAL NO", box, i)
+                assign_if_valid("PERSONAL NO", box)
                 used.add(i)
 
             # -------------------------
             # DATE
             # -------------------------
             if re.search(r'\d{2}[./-]\d{2}[./-]\d{4}', text):
-                date_boxes.append((i, box))
+                if "DATE OF BIRTH" not in entities:
+                    assign_if_valid("DATE OF BIRTH", box)
+                elif "DATE OF ISSUE" not in entities:
+                    assign_if_valid("DATE OF ISSUE", box)
+                elif "DATE OF EXPIRY" not in entities:
+                    assign_if_valid("DATE OF EXPIRY", box)
 
             # -------------------------
             # SEX
             # -------------------------
             if text in ["M", "F"]:
-                assign_if_valid("SEX", box, i)
+                entities["SEX"] = box
 
             # HEIGHT detection (optional, country-dependent)
             if re.search(r'\b\d{3}\b', text):
@@ -663,13 +636,9 @@ class DocumentForgeryDetector:
 
                         dy = candidate["bbox"][1] - box["bbox"][3]
                         dx = candidate["bbox"][0] - box["bbox"][0]
-                        candidate_y = y_mid(candidate["bbox"])
-                        label_y = y_mid(box["bbox"])
 
                         # Prefer directly below or right
                         if (0 <= dy <= 60) or (0 <= dx <= 200):
-                            if abs(candidate_y - label_y) > 40:
-                                continue
 
                             if is_label_like(candidate["norm"]):
                                 continue
@@ -677,30 +646,30 @@ class DocumentForgeryDetector:
                             if not self._is_valid_for_field(field, candidate["text"]):
                                 continue
 
-                            assign_if_valid(field, candidate, j)
+                            assign_if_valid(field, candidate)
                             used.add(j)
                             break
 
         # NAME ORDER FIX (Albanian-specific pattern)
-        names = [(idx, b) for idx, b in enumerate(boxes) if re.fullmatch(r'[A-Z]{3,}', b["norm"])]
+        names = [b for b in boxes if re.fullmatch(r'[A-Z]{3,}', b["norm"])]
 
         if len(names) >= 2:
             # Usually: SURNAME first, GIVEN NAME second
-            names_sorted = sorted(names, key=lambda item: item[1]["bbox"][1])
+            names_sorted = sorted(names, key=lambda b: b["bbox"][1])
 
             if "SURNAME" not in entities:
-                assign_if_valid("SURNAME", names_sorted[0][1], names_sorted[0][0])
+                entities["SURNAME"] = names_sorted[0]
 
             if "GIVEN NAME" not in entities:
-                assign_if_valid("GIVEN NAME", names_sorted[1][1], names_sorted[1][0])
+                entities["GIVEN NAME"] = names_sorted[1]
 
-        for idx, box in enumerate(boxes):
+        for box in boxes:
             if "ALBANIAN" in box["norm"] or "SHQIP" in box["norm"]:
-                assign_if_valid("NATIONALITY", box, idx)
+                entities["NATIONALITY"] = box
 
-        for idx, box in enumerate(boxes):
+        for box in boxes:
             if "," in box["text"] and "ALB" in box["text"]:
-                assign_if_valid("PLACE OF BIRTH", box, idx)
+                assign_if_valid("PLACE OF BIRTH", box)
 
         anchors = []
         for i, box in enumerate(boxes):
@@ -856,14 +825,14 @@ class DocumentForgeryDetector:
             'DATE OF EXPIRY',
             'SEX',
             'DOCUMENT NO',
-        }
-
-        optional_fields = {
-            'HEIGHT',
             'PERSONAL NO',
             'NATIONALITY',
             'PLACE OF BIRTH',
             'AUTHORITY',
+        }
+
+        optional_fields = {
+            'HEIGHT',
             'MRZ LINE 1',
             'MRZ LINE 2',
         }
