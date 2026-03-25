@@ -1,89 +1,89 @@
 {
   "holdout": {
     "dataset": "Hold-out Test",
-    "accuracy": 0.8888888888888888,
-    "balanced_accuracy": 0.9,
-    "precision": 0.8,
-    "recall": 1.0,
-    "f1_score": 0.8888888888888888,
-    "mcc": 0.8,
-    "roc_auc": 1.0,
+    "accuracy": 0.7894736842105263,
+    "balanced_accuracy": 0.7820855614973261,
+    "precision": 0.7627118644067796,
+    "recall": 0.8823529411764706,
+    "f1_score": 0.8181818181818182,
+    "mcc": 0.5798892036972315,
+    "roc_auc": 0.8346702317290553,
     "classification_report": {
       "Genuine": {
-        "precision": 1.0,
-        "recall": 0.8,
-        "f1-score": 0.8888888888888888,
-        "support": 5.0
+        "precision": 0.8333333333333334,
+        "recall": 0.6818181818181818,
+        "f1-score": 0.75,
+        "support": 44.0
       },
       "Forged": {
-        "precision": 0.8,
-        "recall": 1.0,
-        "f1-score": 0.8888888888888888,
-        "support": 4.0
+        "precision": 0.7627118644067796,
+        "recall": 0.8823529411764706,
+        "f1-score": 0.8181818181818182,
+        "support": 51.0
       },
-      "accuracy": 0.8888888888888888,
+      "accuracy": 0.7894736842105263,
       "macro avg": {
-        "precision": 0.9,
-        "recall": 0.9,
-        "f1-score": 0.8888888888888888,
-        "support": 9.0
+        "precision": 0.7980225988700564,
+        "recall": 0.7820855614973261,
+        "f1-score": 0.7840909090909092,
+        "support": 95.0
       },
       "weighted avg": {
-        "precision": 0.911111111111111,
-        "recall": 0.8888888888888888,
-        "f1-score": 0.8888888888888888,
-        "support": 9.0
+        "precision": 0.7954207552780256,
+        "recall": 0.7894736842105263,
+        "f1-score": 0.7866028708133971,
+        "support": 95.0
       }
     },
-    "tn": 4,
-    "fp": 1,
-    "fn": 0,
-    "tp": 4,
-    "false_positive_rate": 0.2,
-    "false_negative_rate": 0.0
+    "tn": 30,
+    "fp": 14,
+    "fn": 6,
+    "tp": 45,
+    "false_positive_rate": 0.3181818181818182,
+    "false_negative_rate": 0.11764705882352941
   },
   "validation_set": {
     "dataset": "Validation Set",
-    "accuracy": 0.55,
-    "balanced_accuracy": 0.55,
-    "precision": 1.0,
-    "recall": 0.1,
-    "f1_score": 0.18181818181818182,
-    "mcc": 0.22941573387056174,
-    "roc_auc": 0.62,
+    "accuracy": 0.45,
+    "balanced_accuracy": 0.45,
+    "precision": 0.0,
+    "recall": 0.0,
+    "f1_score": 0.0,
+    "mcc": -0.22941573387056174,
+    "roc_auc": 0.53,
     "classification_report": {
       "Genuine": {
-        "precision": 0.5263157894736842,
-        "recall": 1.0,
-        "f1-score": 0.6896551724137931,
+        "precision": 0.47368421052631576,
+        "recall": 0.9,
+        "f1-score": 0.6206896551724138,
         "support": 10.0
       },
       "Forged": {
-        "precision": 1.0,
-        "recall": 0.1,
-        "f1-score": 0.18181818181818182,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1-score": 0.0,
         "support": 10.0
       },
-      "accuracy": 0.55,
+      "accuracy": 0.45,
       "macro avg": {
-        "precision": 0.763157894736842,
-        "recall": 0.55,
-        "f1-score": 0.4357366771159875,
+        "precision": 0.23684210526315788,
+        "recall": 0.45,
+        "f1-score": 0.3103448275862069,
         "support": 20.0
       },
       "weighted avg": {
-        "precision": 0.7631578947368421,
-        "recall": 0.55,
-        "f1-score": 0.43573667711598746,
+        "precision": 0.23684210526315788,
+        "recall": 0.45,
+        "f1-score": 0.3103448275862069,
         "support": 20.0
       }
     },
-    "tn": 10,
-    "fp": 0,
-    "fn": 9,
-    "tp": 1,
-    "false_positive_rate": 0.0,
-    "false_negative_rate": 0.9
+    "tn": 9,
+    "fp": 1,
+    "fn": 10,
+    "tp": 0,
+    "false_positive_rate": 0.1,
+    "false_negative_rate": 1.0
   },
   "testing_set": {
     "dataset": "Test Set",
@@ -93,7 +93,7 @@
     "recall": 0.0,
     "f1_score": 0.0,
     "mcc": 0.0,
-    "roc_auc": 0.75,
+    "roc_auc": 0.5833333333333333,
     "classification_report": {
       "Genuine": {
         "precision": 0.4,
