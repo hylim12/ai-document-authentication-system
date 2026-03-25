@@ -46,7 +46,7 @@ class DocumentForgeryDetector:
         try:
             # Standardize input for consistent feature extraction
             pil_image = Image.open(image_path).convert("RGB")
-            target_width = max(600, int(target_width))
+            target_width = max(1200, int(target_width))
             w_percent = target_width / float(pil_image.size[0])
             target_height = int(pil_image.size[1] * w_percent)
 
@@ -1299,47 +1299,102 @@ class DocumentForgeryDetector:
 
     def perform_ocr(self):
         """Initializes and executes the PaddleOCR engine to retrieve raw text and spatial data."""
-        self.log.append("- OCR: Starting PaddleOCR.")
-        
-        # Use the injected engine if available, otherwise fallback to creating one
+        self.log.append("- OCR: Multi-pass PaddleOCR started.")
+
         if self.ocr_engine is None:
             if not PaddleOCR:
                 self.ocr_full_text = "OCR NOT AVAILABLE"
-                self.log.append("- OCR failed: Library not found.")
                 return
             self.ocr_engine = PaddleOCR(use_angle_cls=True, lang='en', use_gpu=False, show_log=False)
-        try:
-            result = self.ocr_engine.ocr(np.array(self.original_image), cls=True)
-            self.ocr_boxes = []
 
-            if not result or not result[0]:
-                print("[DEBUG] PaddleOCR returned NOTHING.")
-                return
-            
-            for line in result[0]:
-                bbox = line[0]
-                text = line[1][0]
-                conf = line[1][1]
+        all_boxes = []
+        variants = self._generate_ocr_variants()
 
-                x_coords = [p[0] for p in bbox]
-                y_coords = [p[1] for p in bbox]
+        for idx, img in enumerate(variants):
+            try:
+                result = self.ocr_engine.ocr(img, cls=True)
 
-                x1, y1 = int(min(x_coords)), int(min(y_coords))
-                x2, y2 = int(max(x_coords)), int(max(y_coords))
+                if not result or not result[0]:
+                    continue
 
-                self.ocr_boxes.append({
-                    "text": text.strip(),
-                    "confidence": conf,
-                    "bbox": (x1, y1, x2, y2)
-                })
+                for line in result[0]:
+                    bbox = line[0]
+                    text = line[1][0]
+                    conf = line[1][1]
 
-            self.ocr_full_text = " ".join(
-                box["text"] for box in self.ocr_boxes if box.get("text")
-            )
+                    if conf < 0.4:
+                        continue
 
-        except Exception as e:
-            self.log.append(f"- PaddleOCR Error: {e}")
-            self.ocr_full_text = "OCR ERROR"
+                    x_coords = [p[0] for p in bbox]
+                    y_coords = [p[1] for p in bbox]
+
+                    x1, y1 = int(min(x_coords)), int(min(y_coords))
+                    x2, y2 = int(max(x_coords)), int(max(y_coords))
+
+                    all_boxes.append({
+                        "text": text.strip(),
+                        "confidence": conf,
+                        "bbox": (x1, y1, x2, y2)
+                    })
+
+            except Exception as e:
+                self.log.append(f"- OCR variant {idx} failed: {e}")
+
+        self.ocr_boxes = self._merge_ocr_boxes(all_boxes)
+        self.ocr_full_text = " ".join(
+            box["text"] for box in self.ocr_boxes if box.get("text")
+        )
+
+    def _generate_ocr_variants(self):
+        variants = []
+
+        # 1. Original
+        variants.append(self.original_image)
+
+        # 2. Grayscale
+        gray = cv2.cvtColor(self.original_image, cv2.COLOR_BGR2GRAY)
+        variants.append(gray)
+
+        # 3. CLAHE enhanced
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+        variants.append(enhanced)
+
+        # 4. Sharpened
+        kernel = np.array([[0, -1, 0],
+                           [-1, 5, -1],
+                           [0, -1, 0]])
+        sharp = cv2.filter2D(gray, -1, kernel)
+        variants.append(sharp)
+
+        # 5. Threshold (binary)
+        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        variants.append(thresh)
+
+        return variants
+
+    def _merge_ocr_boxes(self, boxes):
+        merged = []
+
+        for box in boxes:
+            x1, y1, _, _ = box["bbox"]
+            duplicate = False
+
+            for m in merged:
+                mx1, my1, _, _ = m["bbox"]
+
+                # overlap check
+                if abs(x1 - mx1) < 20 and abs(y1 - my1) < 20:
+                    # keep higher confidence
+                    if box["confidence"] > m["confidence"]:
+                        m.update(box)
+                    duplicate = True
+                    break
+
+            if not duplicate:
+                merged.append(box)
+
+        return merged
 
     def _parse_date_from_text(self, text):
         """Parse a date value from OCR text using common ID formats."""
