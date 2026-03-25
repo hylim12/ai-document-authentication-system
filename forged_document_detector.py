@@ -656,7 +656,7 @@ class DocumentForgeryDetector:
             # -------------------------
             # ID CARD / PASSPORT NUMBER
             # -------------------------
-            if re.fullmatch(r'[A-Z0-9]{7,12}', text):
+            if re.fullmatch(r'\d{6,10}', text):
                 assign_if_valid("ID CARD NO", box)
                 used.add(i)
 
@@ -759,17 +759,26 @@ class DocumentForgeryDetector:
                 del entities["GIVEN NAME"]
         # GIVEN NAME (STRONG FIX)
         for i, box in enumerate(boxes):
-            if any(k in box["norm"] for k in ["GIVEN", "EMRI", "NAME"]):
+            if "GIVEN" in box["norm"] or "EMRI" in box["norm"]:
+                best_candidate = None
+                best_score = -999
+
                 for j, candidate in enumerate(boxes):
                     if j == i:
                         continue
                     dy = candidate["bbox"][1] - box["bbox"][3]
                     dx = abs(candidate["bbox"][0] - box["bbox"][0])
-                    if 0 <= dy <= 70 and dx <= 120 and is_valid_for_field("GIVEN NAME", candidate["text"]):
-                        assign_if_valid("GIVEN NAME", candidate)
-                        used.add(j)
-                        break
-                if "GIVEN NAME" in entities:
+
+                    if 0 <= dy <= 120 and dx <= 200:
+                        if not is_valid_for_field("GIVEN NAME", candidate["text"]):
+                            continue
+                        score = self._score_candidate("GIVEN NAME", candidate, box)
+                        if score > best_score:
+                            best_score = score
+                            best_candidate = candidate
+
+                if best_candidate:
+                    entities["GIVEN NAME"] = best_candidate
                     break
 
         # SURNAME (STRONG FIX)
@@ -799,7 +808,7 @@ class DocumentForgeryDetector:
                 assign_if_valid("NATIONALITY", box)
 
         for box in boxes:
-            if "," in box["text"] and "ALB" in box["text"]:
+            if "," in box["text"] and not any(char.isdigit() for char in box["text"]):
                 assign_if_valid("PLACE OF BIRTH", box)
 
         # AUTHORITY (IMPROVED)
@@ -818,6 +827,20 @@ class DocumentForgeryDetector:
                             break
                 if "AUTHORITY" in entities:
                     break
+
+        if "AUTHORITY" not in entities:
+            for box in boxes:
+                text = box["text"].strip()
+                if re.fullmatch(r'[A-Z]{2,5}', text) and text not in ["M", "F"]:
+                    entities["AUTHORITY"] = box
+                    break
+
+        if country == "ALBANIA" and "NATIONALITY" not in entities:
+            entities["NATIONALITY"] = {
+                "text": "ALBANIAN",
+                "bbox": (0, 0, 0, 0),
+                "confidence": 0.9
+            }
 
         if not all(k in entities for k in ["DATE OF BIRTH", "DATE OF ISSUE", "DATE OF EXPIRY"]):
             # STEP 1: Collect ALL date candidates
@@ -1187,7 +1210,11 @@ class DocumentForgeryDetector:
         if field in ["DATE OF BIRTH", "DATE OF ISSUE", "DATE OF EXPIRY"]:
             return bool(re.search(r'\b\d{2}[./-]\d{2}[./-]\d{4}\b', text))
 
-        if field in ["ID CARD NO", "PASSPORT NO"]:
+        if field == "ID CARD NO":
+            cleaned = re.sub(r'[^0-9]', '', text)
+            return bool(re.fullmatch(r'\d{6,10}', cleaned))
+
+        if field == "PASSPORT NO":
             cleaned = re.sub(r'[^A-Z0-9]', '', text)
 
             # Must be digits OR alphanumeric (but NOT personal format)
