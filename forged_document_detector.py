@@ -33,6 +33,27 @@ warnings.filterwarnings('ignore')
 # LLM NER removed — using rule-based regex only
 extract_passport_fields_llm = None
 
+COUNTRY_REQUIRED_FIELDS = {
+    "ALBANIA": [
+        "SURNAME", "GIVEN NAME", "DATE OF BIRTH", "DATE OF ISSUE",
+        "DATE OF EXPIRY", "SEX", "ID CARD NO", "PERSONAL NO"
+    ],
+    "LATVIA": [
+        "SURNAME", "GIVEN NAME", "DATE OF BIRTH", "DATE OF ISSUE",
+        "DATE OF EXPIRY", "SEX", "PASSPORT NO"
+    ],
+    "SLOVAKIA": [
+        "SURNAME", "GIVEN NAME", "DATE OF BIRTH", "DATE OF ISSUE",
+        "DATE OF EXPIRY", "SEX", "ID CARD NO", "PERSONAL NO"
+    ]
+}
+
+COUNTRY_OPTIONAL_FIELDS = {
+    "ALBANIA": ["PLACE OF BIRTH", "AUTHORITY", "SIGNATURE"],
+    "LATVIA": ["HEIGHT", "PLACE OF BIRTH", "AUTHORITY", "PERSONAL NO", "SIGNATURE"],
+    "SLOVAKIA": ["AUTHORITY", "SIGNATURE"]
+}
+
 class DocumentForgeryDetector:
 
     def __init__(self, image_path, ocr_engine=None, target_width=1500):
@@ -46,7 +67,7 @@ class DocumentForgeryDetector:
         try:
             # Standardize input for consistent feature extraction
             pil_image = Image.open(image_path).convert("RGB")
-            target_width = max(600, int(target_width))
+            target_width = max(1200, int(target_width))
             w_percent = target_width / float(pil_image.size[0])
             target_height = int(pil_image.size[1] * w_percent)
 
@@ -444,6 +465,60 @@ class DocumentForgeryDetector:
         self.log.append(f"- Clustered into {len(regions)} suspicious regions.")
         return self.suspicious_regions
 
+    def _is_header_text(self, text):
+        text = str(text or "").upper().replace(" ", "")
+
+        blacklist = [
+            "REPUBLIK",
+            "REPUBLIC",
+            "SHQIP",
+            "ALBANIA",
+            "LETERNJOFTIM",
+            "PASSPORT",
+            "LATVIJ",
+            "SLOVENSK"
+        ]
+
+        # Reject long uppercase strings (very important)
+        if len(text) > 15:
+            return True
+
+        return any(word in text for word in blacklist)
+
+    def _validate_dates(self, entities):
+        def _parse_date(value):
+            cleaned = str(value or "").strip().replace(".", "-").replace("/", "-")
+            return datetime.strptime(cleaned, "%d-%m-%Y")
+
+        try:
+            dob = _parse_date(entities["DATE OF BIRTH"]["text"])
+            issue = _parse_date(entities["DATE OF ISSUE"]["text"])
+            expiry = _parse_date(entities["DATE OF EXPIRY"]["text"])
+
+            # Logical rule
+            if not (dob < issue < expiry):
+                # 🚫 Remove incorrect assignments
+                if issue <= dob:
+                    entities.pop("DATE OF ISSUE", None)
+
+                if expiry <= issue:
+                    entities.pop("DATE OF EXPIRY", None)
+
+        except Exception:
+            pass
+
+    def _is_passport(self, boxes):
+        mrz_lines = [b for b in boxes if "<" in b["text"] and len(b["text"]) > 20]
+        return len(mrz_lines) >= 2
+
+    def _parse_date_from_text(self, text):
+        cleaned = str(text or "").strip().replace(".", "-").replace("/", "-")
+        if not re.fullmatch(r"\d{2}-\d{2}-\d{4}", cleaned):
+            return None
+        try:
+            return datetime.strptime(cleaned, "%d-%m-%Y")
+        except Exception:
+            return None
 
     def identify_critical_entities_from_ocr(self, print_summary=True):
         """
@@ -471,10 +546,15 @@ class DocumentForgeryDetector:
                 continue
             if x2 <= x1 or y2 <= y1:
                 continue
+            text_clean = box.get("text", "").strip()
+
+            # 🚫 REMOVE HEADER TEXT EARLY
+            if self._is_header_text(text_clean):
+                continue
 
             boxes.append({
-                "text": box.get("text", "").strip(),
-                "norm": normalize(box.get("text", "")),
+                "text": text_clean,
+                "norm": normalize(text_clean),
                 "bbox": (x1, y1, x2, y2),
                 "confidence": box.get("confidence", 0.0)
             })
@@ -486,11 +566,25 @@ class DocumentForgeryDetector:
             self.missing_ner_fields = []
             return
 
+        filtered_boxes = []
+        for box in boxes:
+            if self._is_header_text(box["text"]):
+                continue
+            filtered_boxes.append(box)
+
+        boxes = filtered_boxes
+        self.ocr_boxes = boxes
+        if not boxes:
+            self.ner_entities = {}
+            self.ner_metrics = {}
+            self.missing_ner_fields = []
+            return
+
         def y_mid(b): return (b[1] + b[3]) // 2
         country = self.detect_country(self.ocr_full_text)
+        required_fields = COUNTRY_REQUIRED_FIELDS.get(country, [])
+        optional_fields = COUNTRY_OPTIONAL_FIELDS.get(country, [])
         width, height = self.width, self.height
-        header_blacklist = ["REPUBLIK", "ALBANIA", "LETERNJOFTIM"]
-
         def is_label_like(text):
             for patterns in LABEL_PATTERNS.values():
                 for p in patterns:
@@ -517,12 +611,98 @@ class DocumentForgeryDetector:
         entities = {}
         used = set()
         used_boxes = set()
+        label_map = {}
+        for field, patterns in LABEL_PATTERNS.items():
+            for p in patterns:
+                label_map[p] = field
 
-        def assign_if_valid(field, box):
-            if field in entities and entities[field].get("confidence", 0) >= 0.95:
+        def assign_if_valid(field, box, idx=None):
+            # 🚫 DO NOT override strong values
+            if field in entities:
                 return
-            if self._is_valid_for_field(field, box["text"]):
-                entities[field] = box
+
+            # 🚫 prevent ID ↔ Personal swap
+            if field == "PERSONAL NO" and "ID CARD NO" in entities:
+                if box["text"] == entities["ID CARD NO"]["text"]:
+                    return
+
+            if field == "ID CARD NO" and "PERSONAL NO" in entities:
+                if box["text"] == entities["PERSONAL NO"]["text"]:
+                    return
+
+            if self._is_header_text(box["text"]):
+                return
+
+            if is_label_like(box["norm"]):
+                return
+
+            if not self._is_valid_for_field(field, box["text"]):
+                return
+
+            entities[field] = box
+
+        # 🚀 COUNTRY-SPECIFIC EXTRACTION
+        for field in required_fields:
+            candidate = self.match_field_by_label(field, boxes)
+            if candidate:
+                entities[field] = candidate
+
+        # DIRECT LABEL → VALUE EXTRACTION (STRONG)
+        for i, box in enumerate(boxes):
+            for pattern, field in label_map.items():
+                if re.search(pattern, box["norm"]):
+
+                    for j, candidate in enumerate(boxes):
+                        if j == i:
+                            continue
+
+                        dy = candidate["bbox"][1] - box["bbox"][3]
+                        dx = candidate["bbox"][0] - box["bbox"][0]
+
+                        # Prefer directly below or right
+                        # STRICT MATCHING (NO GUESSING)
+                        # PRIORITY: RIGHT → BELOW → NEAREST
+                        is_right = 0 <= dx <= 250 and abs(dy) <= 30
+                        is_below = 0 <= dy <= 80 and abs(dx) <= 100
+
+                        if not (is_right or is_below):
+                            continue
+
+                        if is_label_like(candidate["norm"]):
+                            continue
+
+                        if not self._is_valid_for_field(field, candidate["text"]):
+                            continue
+
+                        assign_if_valid(field, candidate)
+                        used.add(j)
+                        break
+
+        # 🚀 FALLBACK RULES
+        for box in boxes:
+            text = box["text"].strip().upper()
+
+            if country == "LATVIA":
+                if re.fullmatch(r'[A-Z]{2}\d{7}', text):
+                    entities["PASSPORT NO"] = box
+                if re.fullmatch(r'\d{6}-\d{5}', text):
+                    entities["PERSONAL NO"] = box
+                if text in ["M", "F"]:
+                    entities["SEX"] = box
+                if re.fullmatch(r'\d{3}', text):
+                    entities["HEIGHT"] = box
+
+            if country == "ALBANIA":
+                if re.fullmatch(r'\d{6,10}', text):
+                    entities["ID CARD NO"] = box
+                if re.fullmatch(r'[A-Z]\d{7,9}[A-Z]', text):
+                    entities["PERSONAL NO"] = box
+
+            if country == "SLOVAKIA":
+                if re.fullmatch(r'[A-Z]{2}\d{6}', text):
+                    entities["ID CARD NO"] = box
+                if re.fullmatch(r'\d{6}/\d{4}', text):
+                    entities["PERSONAL NO"] = box
 
         # Strong regex extraction (country-independent)
         for i, box in enumerate(boxes):
@@ -531,7 +711,7 @@ class DocumentForgeryDetector:
             # -------------------------
             # ID CARD / PASSPORT NUMBER
             # -------------------------
-            if re.fullmatch(r'[A-Z0-9]{7,12}', text):
+            if re.fullmatch(r'\d{6,10}', text):
                 assign_if_valid("ID CARD NO", box)
                 used.add(i)
 
@@ -580,14 +760,37 @@ class DocumentForgeryDetector:
                 if near_height_hint and "HEIGHT" not in entities:
                     entities["HEIGHT"] = box
 
+        # STRICT label-based date extraction ONLY
+        for i, box in enumerate(boxes):
+            text = box["norm"]
+
+            if "BIRTH" in text:
+                for candidate in boxes:
+                    dy = candidate["bbox"][1] - box["bbox"][3]
+                    if 0 <= dy <= 60:
+                        assign_if_valid("DATE OF BIRTH", candidate)
+
+            elif "ISSUE" in text:
+                for candidate in boxes:
+                    dy = candidate["bbox"][1] - box["bbox"][3]
+                    if 0 <= dy <= 60:
+                        assign_if_valid("DATE OF ISSUE", candidate)
+
+            elif "EXPIRY" in text or "SKAD" in text:
+                for candidate in boxes:
+                    dy = candidate["bbox"][1] - box["bbox"][3]
+                    if 0 <= dy <= 60:
+                        assign_if_valid("DATE OF EXPIRY", candidate)
+
         # MRZ detection
         mrz_lines = [b for b in boxes if "<" in b["text"] and len(b["text"]) > 20]
 
         if len(mrz_lines) >= 2:
-            mrz_data = self._parse_mrz(mrz_lines[:2])
+            mrz_data = self.mrz_parse_(mrz_lines)
 
+            # 🚀 MRZ IS GROUND TRUTH
             for field, value in mrz_data.items():
-                if field not in entities and value:
+                if value:
                     entities[field] = {
                         "text": value,
                         "bbox": mrz_lines[0]["bbox"],  # approximate
@@ -598,78 +801,127 @@ class DocumentForgeryDetector:
             if country == "LATVIA":
                 self.log.append("- Country detected: LATVIA (optional HEIGHT expected if present).")
 
-        # DATE assignment by vertical order to reduce swaps
-        if date_boxes:
-            sorted_dates = sorted(date_boxes, key=lambda x: x[1]["bbox"][1])
-            date_fields = ["DATE OF BIRTH", "DATE OF ISSUE", "DATE OF EXPIRY"]
-            for field, (idx, date_box) in zip(date_fields, sorted_dates):
-                assign_if_valid(field, date_box, idx)
+        if self._is_passport(boxes):
+            # 🚫 If passport detected, disable PERSONAL NO from OCR
+            if "PERSONAL NO" in entities:
+                del entities["PERSONAL NO"]
 
-        # Direct label-value pair (vertical pairing) for GIVEN NAME
+            # Force names from MRZ only
+            if "SURNAME" in entities and entities["SURNAME"].get("confidence", 0) < 0.95:
+                del entities["SURNAME"]
+
+            if "GIVEN NAME" in entities and entities["GIVEN NAME"].get("confidence", 0) < 0.95:
+                del entities["GIVEN NAME"]
+        # GIVEN NAME (STRONG FIX)
         for i, box in enumerate(boxes):
-            if "GIVEN" in box["norm"] or "EMR" in box["norm"]:
+            if "GIVEN" in box["norm"] or "EMRI" in box["norm"]:
+                best_candidate = None
+                best_score = -999
+
                 for j, candidate in enumerate(boxes):
                     if j == i:
                         continue
                     dy = candidate["bbox"][1] - box["bbox"][3]
-                    if 0 <= dy <= 60 and is_valid_for_field("GIVEN NAME", candidate["text"]):
-                        assign_if_valid("GIVEN NAME", candidate, j)
-                        used.add(j)
-                        break
-                if "GIVEN NAME" in entities:
+                    dx = abs(candidate["bbox"][0] - box["bbox"][0])
+
+                    if 0 <= dy <= 120 and dx <= 200:
+                        if not is_valid_for_field("GIVEN NAME", candidate["text"]):
+                            continue
+                        score = self._score_candidate("GIVEN NAME", candidate, box)
+                        if score > best_score:
+                            best_score = score
+                            best_candidate = candidate
+
+                if best_candidate:
+                    entities["GIVEN NAME"] = best_candidate
                     break
 
-        # Label Anchor Detection: Locate specific headers to act as geometric reference points.
-        label_map = {}
-        for field, patterns in LABEL_PATTERNS.items():
-            for p in patterns:
-                label_map[p] = field
-
-        # DIRECT LABEL → VALUE EXTRACTION (STRONG)
+        # SURNAME (STRONG FIX)
         for i, box in enumerate(boxes):
-            for pattern, field in label_map.items():
-                if re.search(pattern, box["norm"]):
-
-                    for j, candidate in enumerate(boxes):
-                        if j == i:
-                            continue
-
-                        dy = candidate["bbox"][1] - box["bbox"][3]
-                        dx = candidate["bbox"][0] - box["bbox"][0]
-
-                        # Prefer directly below or right
-                        if (0 <= dy <= 60) or (0 <= dx <= 200):
-
-                            if is_label_like(candidate["norm"]):
-                                continue
-
-                            if not self._is_valid_for_field(field, candidate["text"]):
-                                continue
-
-                            assign_if_valid(field, candidate)
-                            used.add(j)
-                            break
-
-        # NAME ORDER FIX (Albanian-specific pattern)
-        names = [b for b in boxes if re.fullmatch(r'[A-Z]{3,}', b["norm"])]
-
-        if len(names) >= 2:
-            # Usually: SURNAME first, GIVEN NAME second
-            names_sorted = sorted(names, key=lambda b: b["bbox"][1])
-
-            if "SURNAME" not in entities:
-                entities["SURNAME"] = names_sorted[0]
-
-            if "GIVEN NAME" not in entities:
-                entities["GIVEN NAME"] = names_sorted[1]
+            if any(k in box["norm"] for k in ["SURNAME", "MBIEMR"]):
+                for j, candidate in enumerate(boxes):
+                    if j == i:
+                        continue
+                    dy = candidate["bbox"][1] - box["bbox"][3]
+                    dx = abs(candidate["bbox"][0] - box["bbox"][0])
+                    if 0 <= dy <= 70 and dx <= 120 and is_valid_for_field("SURNAME", candidate["text"]):
+                        assign_if_valid("SURNAME", candidate)
+                        used.add(j)
+                        break
+                if "SURNAME" in entities:
+                    break
 
         for box in boxes:
-            if "ALBANIAN" in box["norm"] or "SHQIP" in box["norm"]:
-                entities["NATIONALITY"] = box
+            text = box["text"].upper()
+
+            if "SIGNATURE" in text or "FIRMA" in text:
+                continue
+
+            if "/" in text and len(text) < 25:
+                assign_if_valid("NATIONALITY", box)
+            elif re.fullmatch(r'[A-Z]{3}', text):  # MRZ style
+                assign_if_valid("NATIONALITY", box)
 
         for box in boxes:
-            if "," in box["text"] and "ALB" in box["text"]:
+            if "," in box["text"] and not any(char.isdigit() for char in box["text"]):
                 assign_if_valid("PLACE OF BIRTH", box)
+
+        # AUTHORITY (IMPROVED)
+        for i, box in enumerate(boxes):
+            if any(k in box["norm"] for k in ["AUTORIT", "AUTHORITY"]):
+                for j, candidate in enumerate(boxes):
+                    if j == i:
+                        continue
+
+                    dy = candidate["bbox"][1] - box["bbox"][3]
+                    dx = abs(candidate["bbox"][0] - box["bbox"][0])
+                    if 0 <= dy <= 60 and dx <= 150:
+                        text = candidate["text"].strip()
+                        if re.fullmatch(r'[A-Z]{2,5}', text):
+                            entities["AUTHORITY"] = candidate
+                            break
+                if "AUTHORITY" in entities:
+                    break
+
+        if "AUTHORITY" not in entities:
+            for box in boxes:
+                text = box["text"].strip()
+                if re.fullmatch(r'[A-Z]{2,5}', text) and text not in ["M", "F"]:
+                    entities["AUTHORITY"] = box
+                    break
+
+        # 🚀 COUNTRY-BASED NATIONALITY
+        if country == "LATVIA":
+            entities["NATIONALITY"] = {"text": "LVA", "bbox": (0, 0, 0, 0), "confidence": 0.9}
+        elif country == "ALBANIA":
+            entities["NATIONALITY"] = {"text": "ALBANIAN", "bbox": (0, 0, 0, 0), "confidence": 0.9}
+        elif country == "SLOVAKIA":
+            entities["NATIONALITY"] = {"text": "SVK", "bbox": (0, 0, 0, 0), "confidence": 0.9}
+
+        if not all(k in entities for k in ["DATE OF BIRTH", "DATE OF ISSUE", "DATE OF EXPIRY"]):
+            # STEP 1: Collect ALL date candidates
+            date_candidates = [
+                box for box in boxes
+                if re.search(r'\d{2}[./-]\d{2}[./-]\d{4}', box["text"])
+            ]
+
+            # STEP 2: Convert to datetime
+            parsed_dates = []
+            for box in date_candidates:
+                try:
+                    d = self._parse_date_from_text(box["text"])
+                    if d:
+                        parsed_dates.append((d, box))
+                except Exception:
+                    continue
+
+            # STEP 3: SORT BY ACTUAL DATE VALUE
+            parsed_dates = sorted(parsed_dates, key=lambda x: x[0])
+
+            if len(parsed_dates) >= 3:
+                entities["DATE OF BIRTH"] = parsed_dates[0][1]
+                entities["DATE OF ISSUE"] = parsed_dates[1][1]
+                entities["DATE OF EXPIRY"] = parsed_dates[2][1]
 
         anchors = []
         for i, box in enumerate(boxes):
@@ -687,7 +939,7 @@ class DocumentForgeryDetector:
             ay, ax = y_mid(anchor["bbox"]), anchor["bbox"][2]
 
             best_idx = None
-            best_score = float("inf")
+            best_score = -999
 
             for j, box in enumerate(boxes):
                 if j == idx or j in used:
@@ -706,19 +958,49 @@ class DocumentForgeryDetector:
                 if abs(vy - ay) > 40:
                     continue
 
-                score = dx + (abs(vy - ay) * 200)
-                if score < best_score:
+                score = self._score_candidate(label, box, anchor)
+                if score > best_score:
                     best_score = score
                     best_idx = j
 
             if best_idx is not None:
-                assign_if_valid(label, boxes[best_idx], best_idx)
-                used.add(best_idx)
+                if label not in entities:
+                    entities[label] = boxes[best_idx]
+                    used.add(best_idx)
+
+        self._validate_dates(entities)
+
+        # 🚫 PREVENT GIVEN NAME = SURNAME
+        if "GIVEN NAME" in entities and "SURNAME" in entities:
+            if entities["GIVEN NAME"]["text"] == entities["SURNAME"]["text"]:
+                # Keep SURNAME, remove GIVEN NAME
+                del entities["GIVEN NAME"]
+
+        # 🚫 FINAL CLEANUP PASS
+        for field, data in list(entities.items()):
+            if self._is_header_text(data["text"]):
+                del entities[field]
+
+        # 🚫 REMOVE SIGNATURE LEAKS
+        for field, data in list(entities.items()):
+            text = data["text"].upper()
+            if "SIGNATURE" in text or "FIRMA" in text:
+                del entities[field]
+
+        # REMOVE HEADER LEAKS
+        for field in ["SURNAME", "GIVEN NAME", "NATIONALITY"]:
+            if field in entities:
+                if self._is_header_text(entities[field]["text"]):
+                    del entities[field]
 
         # CLEANUP WRONG ASSIGNMENTS
         for field, data in list(entities.items()):
             if not self._is_valid_for_field(field, data["text"]):
                 del entities[field]
+
+        if required_fields:
+            allowed = set(required_fields) | set(optional_fields) | {"MRZ LINE 1", "MRZ LINE 2"}
+            entities = {k: v for k, v in entities.items() if k in allowed}
 
         # Finalize structured Named Entity Recognition (NER) output
         self.ner_entities = {
@@ -737,7 +1019,24 @@ class DocumentForgeryDetector:
         if print_summary:
             self.print_ner_fields_summary()
 
-    def _parse_mrz(self, mrz_lines):
+    def parse_mrz_dates(self, mrz_lines):
+        try:
+            line2 = mrz_lines[1]
+
+            dob_raw = line2[13:19]
+            expiry_raw = line2[21:27]
+
+            def format_date(d):
+                return f"19{d[0:2]}-{d[2:4]}-{d[4:6]}"
+
+            return {
+                "DATE OF BIRTH": format_date(dob_raw),
+                "DATE OF EXPIRY": format_date(expiry_raw)
+            }
+        except:
+            return {}
+        
+    def mrz_parse_(self, mrz_lines):
         """
         Parse MRZ (TD3 format) and extract structured fields.
         Supports standard passport MRZ with 2 lines.
@@ -859,13 +1158,82 @@ class DocumentForgeryDetector:
     def detect_country(self, ocr_text):
         """Infer document country hints from OCR text."""
         text = str(ocr_text or "").upper()
-        if "SHQIP" in text:
+        if any(k in text for k in ["SHQIP", "REPUBLIKA E SHQIPERISE"]):
             return "ALBANIA"
-        if "LATVIJA" in text:
+        if any(k in text for k in ["LATVIJA", "LATVIA", "LVA"]):
             return "LATVIA"
-        if "SLOVENSK" in text:
+        if any(k in text for k in ["SLOVENSK", "SLOVAKIA", "SVK"]):
             return "SLOVAKIA"
         return "UNKNOWN"
+
+    def validate_fields(self, country, entities):
+        """Run strict country-level field validation checks."""
+        issues = []
+
+        def get(field):
+            return entities.get(field, {}).get("text", "").upper()
+
+        sex_value = get("SEX")
+        if sex_value and sex_value not in ["M", "F"]:
+            issues.append("Invalid sex value")
+
+        if country == "ALBANIA":
+            if get("NATIONALITY") != "ALBANIAN":
+                issues.append("Invalid nationality")
+            if not re.fullmatch(r"[A-Z]\d{8}[A-Z]", get("PERSONAL NO")):
+                issues.append("Invalid Personal No format")
+            if not re.fullmatch(r"\d+", get("ID CARD NO")):
+                issues.append("Invalid ID Card No format")
+
+        elif country == "LATVIA":
+            if get("TYPE") not in ["P", "J"]:
+                issues.append("Invalid document type")
+            if get("ISSUING STATE CODE") != "LVA":
+                issues.append("Invalid issuing state")
+            if get("NATIONALITY") != "LATVIJAS":
+                issues.append("Invalid nationality")
+            if not re.fullmatch(r"[A-Z]{2}\d{7}", get("PASSPORT NO")):
+                issues.append("Invalid passport number")
+            personal_no = get("PERSONAL NO")
+            if personal_no and not re.fullmatch(r"\d{6}-\d{5}", personal_no):
+                issues.append("Invalid personal number")
+
+        elif country == "SLOVAKIA":
+            if get("NATIONALITY") != "SVK":
+                issues.append("Invalid nationality")
+            if not re.fullmatch(r"[A-Z]{2}\d{6}", get("ID CARD NO")):
+                issues.append("Invalid ID format")
+            if not re.fullmatch(r"\d{6}/\d{4}", get("PERSONAL NO")):
+                issues.append("Invalid personal number")
+
+        return issues
+
+    def match_field_by_label(self, field, boxes):
+        """Find the best value candidate around a detected label anchor."""
+        best_candidate = None
+        best_score = -999
+
+        for i, box in enumerate(boxes):
+            for pattern in LABEL_PATTERNS.get(field, []):
+                if re.search(pattern, box["norm"]):
+                    for j, candidate in enumerate(boxes):
+                        if j == i:
+                            continue
+
+                        dy = candidate["bbox"][1] - box["bbox"][3]
+                        dx = abs(candidate["bbox"][0] - box["bbox"][0])
+
+                        if 0 <= dy <= 150 and dx <= 250:
+                            if not self._is_valid_for_field(field, candidate["text"]):
+                                continue
+
+                            score = self._score_candidate(field, candidate, box)
+
+                            if score > best_score:
+                                best_score = score
+                                best_candidate = candidate
+
+        return best_candidate
 
     def _is_mostly_alpha(self, text):
         return bool(re.fullmatch(r'[A-Z\s]+', str(text or "")))
@@ -875,6 +1243,85 @@ class DocumentForgeryDetector:
 
     def _is_alphanumeric_id(self, text):
         return bool(re.fullmatch(r'[A-Z0-9]{6,}', str(text or "")))
+
+    def _score_candidate(self, field, candidate, anchor=None):
+        score = 0
+        text = candidate["text"]
+        norm = candidate["norm"]
+        bbox = candidate["bbox"]
+
+        # -------------------------
+        # 1. OCR CONFIDENCE
+        # -------------------------
+        score += candidate.get("confidence", 0) * 2
+
+        # -------------------------
+        # 2. DISTANCE TO LABEL (VERY IMPORTANT)
+        # -------------------------
+        if anchor:
+            ax, ay = anchor["bbox"][0], anchor["bbox"][1]
+            cx, cy = bbox[0], bbox[1]
+
+            dx = abs(cx - ax)
+            dy = abs(cy - ay)
+
+            if dx < 200:
+                score += 2
+            if dy < 50:
+                score += 3
+
+        # -------------------------
+        # 3. FIELD-SPECIFIC RULES
+        # -------------------------
+
+        # NAME
+        if field in ["SURNAME", "GIVEN NAME"]:
+            if len(text.split()) <= 2:
+                score += 2
+            if len(text) < 15:
+                score += 2
+            if "/" in text:
+                score -= 3
+
+        # DATE
+        if "DATE" in field:
+            if re.search(r'\d{2}[./-]\d{2}[./-]\d{4}', text):
+                score += 3
+
+        # ID NUMBER
+        if field in ["ID CARD NO", "PASSPORT NO"]:
+            digits = sum(c.isdigit() for c in text)
+            if digits >= 5:
+                score += 3
+
+        # PERSONAL NO
+        if field == "PERSONAL NO":
+            if re.fullmatch(r'[A-Z]\d+[A-Z]', text):
+                score += 4
+
+        # NATIONALITY
+        if field == "NATIONALITY":
+            if "/" in text:
+                score += 3
+
+        # AUTHORITY
+        if field == "AUTHORITY":
+            if re.fullmatch(r'[A-Z]{2,5}', text):
+                score += 3
+
+        # -------------------------
+        # 4. PENALTIES
+        # -------------------------
+
+        # Header penalty
+        if any(h in norm for h in ["REPUBLIK", "ALBANIA", "SHQIP"]):
+            score -= 10
+
+        # Label penalty
+        if any(re.search(p, norm) for patterns in LABEL_PATTERNS.values() for p in patterns):
+            score -= 5
+
+        return score
 
     def _is_valid_for_field(self, field, text):
         """
@@ -886,33 +1333,62 @@ class DocumentForgeryDetector:
         if not text:
             return False
 
-        text = str(text).strip().upper()
+        raw_text = str(text).strip()
+        text = raw_text.upper()
 
         if field in ["DATE OF BIRTH", "DATE OF ISSUE", "DATE OF EXPIRY"]:
             return bool(re.search(r'\b\d{2}[./-]\d{2}[./-]\d{4}\b', text))
 
-        if field in ["ID CARD NO", "PASSPORT NO"]:
-            return bool(re.fullmatch(r'[A-Z0-9]{6,12}', re.sub(r'[^A-Z0-9]', '', text)))
+        if field == "ID CARD NO":
+            cleaned = re.sub(r'[^0-9]', '', text)
+            compact = re.sub(r'[^A-Z0-9]', '', text)
+            return bool(
+                re.fullmatch(r'\d{6,10}', cleaned) or
+                re.fullmatch(r'[A-Z]{2}\d{6}', compact)
+            )
+
+        if field == "PASSPORT NO":
+            cleaned = re.sub(r'[^A-Z0-9]', '', text)
+            return bool(re.fullmatch(r'[A-Z]{2}\d{7}', cleaned) or re.fullmatch(r'[A-Z0-9]{7,12}', cleaned))
 
         if field == "SEX":
             return text in ["M", "F"]
 
-        if field in ["SURNAME", "GIVEN NAME"]:
-            cleaned = re.sub(r'[^A-Z\s]', ' ', text)
-            cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-            return bool(re.fullmatch(r'[A-Z\s]{3,}', cleaned))
+        if field == "SURNAME":
+            return raw_text.istitle() and len(raw_text.split()) == 1
+
+        if field == "GIVEN NAME":
+            return raw_text.istitle() and len(raw_text.split()) <= 2
 
         if field == "PERSONAL NO":
-            return bool(re.search(r'\d{6,}', text))
+            return bool(
+                re.fullmatch(r'[A-Z]\d{7,9}[A-Z]', text) or
+                re.fullmatch(r'\d{6}-\d{5}', text) or
+                re.fullmatch(r'\d{6}/\d{4}', text)
+            )
 
         if field == "PLACE OF BIRTH":
             return not bool(re.search(r'\d', text))
 
         if field == "NATIONALITY":
-            return bool(re.fullmatch(r'[A-Z\s/]{3,}', text))
+            # Accept MRZ country codes (3 letters)
+            if re.fullmatch(r'[A-Z]{3}', text):
+                return True
+
+            if text in {"ALBANIAN", "LATVIJAS"}:
+                return True
+
+            # Or full text nationality split markers
+            if "/" in text:
+                return True
+
+            return False
 
         if field == "HEIGHT":
             return bool(re.fullmatch(r'\d{3}', text))
+
+        if field == "AUTHORITY":
+            return bool(re.fullmatch(r"[A-ZÀ-Ž' .\-]{2,80}", text))
 
         return True
 
@@ -969,47 +1445,102 @@ class DocumentForgeryDetector:
 
     def perform_ocr(self):
         """Initializes and executes the PaddleOCR engine to retrieve raw text and spatial data."""
-        self.log.append("- OCR: Starting PaddleOCR.")
-        
-        # Use the injected engine if available, otherwise fallback to creating one
+        self.log.append("- OCR: Multi-pass PaddleOCR started.")
+
         if self.ocr_engine is None:
             if not PaddleOCR:
                 self.ocr_full_text = "OCR NOT AVAILABLE"
-                self.log.append("- OCR failed: Library not found.")
                 return
             self.ocr_engine = PaddleOCR(use_angle_cls=True, lang='en', use_gpu=False, show_log=False)
-        try:
-            result = self.ocr_engine.ocr(np.array(self.original_image), cls=True)
-            self.ocr_boxes = []
 
-            if not result or not result[0]:
-                print("[DEBUG] PaddleOCR returned NOTHING.")
-                return
-            
-            for line in result[0]:
-                bbox = line[0]
-                text = line[1][0]
-                conf = line[1][1]
+        all_boxes = []
+        variants = self._generate_ocr_variants()
 
-                x_coords = [p[0] for p in bbox]
-                y_coords = [p[1] for p in bbox]
+        for idx, img in enumerate(variants):
+            try:
+                result = self.ocr_engine.ocr(img, cls=True)
 
-                x1, y1 = int(min(x_coords)), int(min(y_coords))
-                x2, y2 = int(max(x_coords)), int(max(y_coords))
+                if not result or not result[0]:
+                    continue
 
-                self.ocr_boxes.append({
-                    "text": text.strip(),
-                    "confidence": conf,
-                    "bbox": (x1, y1, x2, y2)
-                })
+                for line in result[0]:
+                    bbox = line[0]
+                    text = line[1][0]
+                    conf = line[1][1]
 
-            self.ocr_full_text = " ".join(
-                box["text"] for box in self.ocr_boxes if box.get("text")
-            )
+                    if conf < 0.4:
+                        continue
 
-        except Exception as e:
-            self.log.append(f"- PaddleOCR Error: {e}")
-            self.ocr_full_text = "OCR ERROR"
+                    x_coords = [p[0] for p in bbox]
+                    y_coords = [p[1] for p in bbox]
+
+                    x1, y1 = int(min(x_coords)), int(min(y_coords))
+                    x2, y2 = int(max(x_coords)), int(max(y_coords))
+
+                    all_boxes.append({
+                        "text": text.strip(),
+                        "confidence": conf,
+                        "bbox": (x1, y1, x2, y2)
+                    })
+
+            except Exception as e:
+                self.log.append(f"- OCR variant {idx} failed: {e}")
+
+        self.ocr_boxes = self._merge_ocr_boxes(all_boxes)
+        self.ocr_full_text = " ".join(
+            box["text"] for box in self.ocr_boxes if box.get("text")
+        )
+
+    def _generate_ocr_variants(self):
+        variants = []
+
+        # 1. Original
+        variants.append(self.original_image)
+
+        # 2. Grayscale
+        gray = cv2.cvtColor(self.original_image, cv2.COLOR_BGR2GRAY)
+        variants.append(gray)
+
+        # 3. CLAHE enhanced
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+        variants.append(enhanced)
+
+        # 4. Sharpened
+        kernel = np.array([[0, -1, 0],
+                           [-1, 5, -1],
+                           [0, -1, 0]])
+        sharp = cv2.filter2D(gray, -1, kernel)
+        variants.append(sharp)
+
+        # 5. Threshold (binary)
+        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        variants.append(thresh)
+
+        return variants
+
+    def _merge_ocr_boxes(self, boxes):
+        merged = []
+
+        for box in boxes:
+            x1, y1, _, _ = box["bbox"]
+            duplicate = False
+
+            for m in merged:
+                mx1, my1, _, _ = m["bbox"]
+
+                # overlap check
+                if abs(x1 - mx1) < 20 and abs(y1 - my1) < 20:
+                    # keep higher confidence
+                    if box["confidence"] > m["confidence"]:
+                        m.update(box)
+                    duplicate = True
+                    break
+
+            if not duplicate:
+                merged.append(box)
+
+        return merged
 
     def _parse_date_from_text(self, text):
         """Parse a date value from OCR text using common ID formats."""
@@ -1168,6 +1699,10 @@ class DocumentForgeryDetector:
             
             # 2. Identify Fields and Values using rule-based regex NER
             self.identify_critical_entities_from_ocr(print_summary=False)
+            country = self.detect_country(self.ocr_full_text)
+            validation_issues = self.validate_fields(country, self.ner_entities)
+            if validation_issues:
+                self.forgery_issues.extend(validation_issues)
             self.save_ocr_json(self.image_path)
 
             # 3. Run physical and OCR box checks
