@@ -5,7 +5,7 @@ LABEL_PATTERNS = {
         r"SURNAME", r"MBIEMRI", r"UZV[ĀA]RDS", r"PRIEZVISKO", r"UZVARDS"
     ],
     "GIVEN NAME": [
-        r"GIVEN\s*NAME", r"EMRI", r"V[ĀA]RDS", r"MENO", r"GIVEN\s*NAMES?"
+        r"GIVEN\s*NAMES", r"EMRI", r"V[ĀA]RDS", r"MENO", r"GIVEN\s*NAMES?"
     ],
 
     # --- NATIONALITY ---
