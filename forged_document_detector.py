@@ -33,6 +33,28 @@ warnings.filterwarnings('ignore')
 # LLM NER removed — using rule-based regex only
 extract_passport_fields_llm = None
 
+COUNTRY_FIELDS = {
+    "ALBANIA": [
+        "SURNAME", "GIVEN NAME", "NATIONALITY",
+        "PLACE OF BIRTH", "DATE OF BIRTH",
+        "DATE OF ISSUE", "DATE OF EXPIRY",
+        "AUTHORITY", "SEX", "ID CARD NO", "PERSONAL NO"
+    ],
+    "LATVIA": [
+        "SURNAME", "GIVEN NAME", "NATIONALITY",
+        "DATE OF BIRTH", "DATE OF ISSUE",
+        "DATE OF EXPIRY", "SEX",
+        "PASSPORT NO", "PERSONAL NO",
+        "PLACE OF BIRTH", "AUTHORITY", "HEIGHT"
+    ],
+    "SLOVAKIA": [
+        "SURNAME", "GIVEN NAME", "NATIONALITY",
+        "SEX", "ID CARD NO", "PERSONAL NO",
+        "DATE OF BIRTH", "DATE OF ISSUE",
+        "DATE OF EXPIRY", "AUTHORITY"
+    ]
+}
+
 class DocumentForgeryDetector:
 
     def __init__(self, image_path, ocr_engine=None, target_width=1500):
@@ -561,6 +583,7 @@ class DocumentForgeryDetector:
 
         def y_mid(b): return (b[1] + b[3]) // 2
         country = self.detect_country(self.ocr_full_text)
+        required_fields = COUNTRY_FIELDS.get(country, [])
         width, height = self.width, self.height
         def is_label_like(text):
             for patterns in LABEL_PATTERNS.values():
@@ -618,6 +641,12 @@ class DocumentForgeryDetector:
 
             entities[field] = box
 
+        # 🚀 COUNTRY-SPECIFIC EXTRACTION
+        for field in required_fields:
+            candidate = self.match_field_by_label(field, boxes)
+            if candidate:
+                entities[field] = candidate
+
         # DIRECT LABEL → VALUE EXTRACTION (STRONG)
         for i, box in enumerate(boxes):
             for pattern, field in label_map.items():
@@ -648,6 +677,32 @@ class DocumentForgeryDetector:
                         assign_if_valid(field, candidate)
                         used.add(j)
                         break
+
+        # 🚀 FALLBACK RULES
+        for box in boxes:
+            text = box["text"].strip().upper()
+
+            if country == "LATVIA":
+                if re.fullmatch(r'[A-Z]{2}\d{7}', text):
+                    entities["PASSPORT NO"] = box
+                if re.fullmatch(r'\d{6}-\d{5}', text):
+                    entities["PERSONAL NO"] = box
+                if text in ["M", "F"]:
+                    entities["SEX"] = box
+                if re.fullmatch(r'\d{3}', text):
+                    entities["HEIGHT"] = box
+
+            if country == "ALBANIA":
+                if re.fullmatch(r'\d{6,10}', text):
+                    entities["ID CARD NO"] = box
+                if re.fullmatch(r'[A-Z]\d{7,9}[A-Z]', text):
+                    entities["PERSONAL NO"] = box
+
+            if country == "SLOVAKIA":
+                if re.fullmatch(r'[A-Z]{2}\d{6}', text):
+                    entities["ID CARD NO"] = box
+                if re.fullmatch(r'\d{6}/\d{4}', text):
+                    entities["PERSONAL NO"] = box
 
         # Strong regex extraction (country-independent)
         for i, box in enumerate(boxes):
@@ -835,12 +890,13 @@ class DocumentForgeryDetector:
                     entities["AUTHORITY"] = box
                     break
 
-        if country == "ALBANIA" and "NATIONALITY" not in entities:
-            entities["NATIONALITY"] = {
-                "text": "ALBANIAN",
-                "bbox": (0, 0, 0, 0),
-                "confidence": 0.9
-            }
+        # 🚀 COUNTRY-BASED NATIONALITY
+        if country == "LATVIA":
+            entities["NATIONALITY"] = {"text": "LVA", "bbox": (0, 0, 0, 0), "confidence": 0.9}
+        elif country == "ALBANIA":
+            entities["NATIONALITY"] = {"text": "ALBANIAN", "bbox": (0, 0, 0, 0), "confidence": 0.9}
+        elif country == "SLOVAKIA":
+            entities["NATIONALITY"] = {"text": "SVK", "bbox": (0, 0, 0, 0), "confidence": 0.9}
 
         if not all(k in entities for k in ["DATE OF BIRTH", "DATE OF ISSUE", "DATE OF EXPIRY"]):
             # STEP 1: Collect ALL date candidates
@@ -941,6 +997,10 @@ class DocumentForgeryDetector:
         for field, data in list(entities.items()):
             if not self._is_valid_for_field(field, data["text"]):
                 del entities[field]
+
+        if required_fields:
+            allowed = set(required_fields) | {"MRZ LINE 1", "MRZ LINE 2"}
+            entities = {k: v for k, v in entities.items() if k in allowed}
 
         # Finalize structured Named Entity Recognition (NER) output
         self.ner_entities = {
@@ -1098,13 +1158,40 @@ class DocumentForgeryDetector:
     def detect_country(self, ocr_text):
         """Infer document country hints from OCR text."""
         text = str(ocr_text or "").upper()
-        if "SHQIP" in text:
+        if any(k in text for k in ["SHQIP", "REPUBLIKA E SHQIPERISE"]):
             return "ALBANIA"
-        if "LATVIJA" in text:
+        if any(k in text for k in ["LATVIJA", "LATVIA", "LVA"]):
             return "LATVIA"
-        if "SLOVENSK" in text:
+        if any(k in text for k in ["SLOVENSK", "SLOVAKIA", "SVK"]):
             return "SLOVAKIA"
         return "UNKNOWN"
+
+    def match_field_by_label(self, field, boxes):
+        """Find the best value candidate around a detected label anchor."""
+        best_candidate = None
+        best_score = -999
+
+        for i, box in enumerate(boxes):
+            for pattern in LABEL_PATTERNS.get(field, []):
+                if re.search(pattern, box["norm"]):
+                    for j, candidate in enumerate(boxes):
+                        if j == i:
+                            continue
+
+                        dy = candidate["bbox"][1] - box["bbox"][3]
+                        dx = abs(candidate["bbox"][0] - box["bbox"][0])
+
+                        if 0 <= dy <= 150 and dx <= 250:
+                            if not self._is_valid_for_field(field, candidate["text"]):
+                                continue
+
+                            score = self._score_candidate(field, candidate, box)
+
+                            if score > best_score:
+                                best_score = score
+                                best_candidate = candidate
+
+        return best_candidate
 
     def _is_mostly_alpha(self, text):
         return bool(re.fullmatch(r'[A-Z\s]+', str(text or "")))
@@ -1212,16 +1299,15 @@ class DocumentForgeryDetector:
 
         if field == "ID CARD NO":
             cleaned = re.sub(r'[^0-9]', '', text)
-            return bool(re.fullmatch(r'\d{6,10}', cleaned))
+            compact = re.sub(r'[^A-Z0-9]', '', text)
+            return bool(
+                re.fullmatch(r'\d{6,10}', cleaned) or
+                re.fullmatch(r'[A-Z]{2}\d{6}', compact)
+            )
 
         if field == "PASSPORT NO":
             cleaned = re.sub(r'[^A-Z0-9]', '', text)
-
-            # Must be digits OR alphanumeric (but NOT personal format)
-            if re.fullmatch(r'[A-Z]\d+[A-Z]', cleaned):
-                return False  # 🚫 avoid personal no
-
-            return bool(re.fullmatch(r'[A-Z0-9]{7,12}', cleaned))
+            return bool(re.fullmatch(r'[A-Z]{2}\d{7}', cleaned) or re.fullmatch(r'[A-Z0-9]{7,12}', cleaned))
 
         if field == "SEX":
             return text in ["M", "F"]
@@ -1233,11 +1319,11 @@ class DocumentForgeryDetector:
             return raw_text.istitle() and len(raw_text.split()) <= 2
 
         if field == "PERSONAL NO":
-            # Must follow pattern like J12345678X
-            if not re.fullmatch(r'[A-Z]\d{7,9}[A-Z]', text):
-                return False
-
-            return True
+            return bool(
+                re.fullmatch(r'[A-Z]\d{7,9}[A-Z]', text) or
+                re.fullmatch(r'\d{6}-\d{5}', text) or
+                re.fullmatch(r'\d{6}/\d{4}', text)
+            )
 
         if field == "PLACE OF BIRTH":
             return not bool(re.search(r'\d', text))
@@ -1247,7 +1333,10 @@ class DocumentForgeryDetector:
             if re.fullmatch(r'[A-Z]{3}', text):
                 return True
 
-            # Or full text nationality
+            if text in {"ALBANIAN", "LATVIJAS"}:
+                return True
+
+            # Or full text nationality split markers
             if "/" in text:
                 return True
 
@@ -1257,19 +1346,7 @@ class DocumentForgeryDetector:
             return bool(re.fullmatch(r'\d{3}', text))
 
         if field == "AUTHORITY":
-            # Must be short uppercase code ONLY
-            if not re.fullmatch(r'[A-Z]{2,5}', text):
-                return False
-
-            # Reject names
-            if text.istitle():
-                return False
-
-            # Reject long text
-            if len(text) > 5:
-                return False
-
-            return True
+            return bool(re.fullmatch(r"[A-ZÀ-Ž' .\-]{2,80}", text))
 
         return True
 

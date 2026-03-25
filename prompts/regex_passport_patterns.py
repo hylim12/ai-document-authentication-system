@@ -23,8 +23,14 @@ LABEL_PATTERNS = {
     "ID CARD NO": [
         r"ID", r"CARD", r"NR", r"ČÍSLO"
     ],
+    "PASSPORT NO": [
+        r"PASSPORT", r"PASE", r"NR", r"NUM"
+    ],
     "PERSONAL NO": [
         r"PERSONAL", r"KODS", r"ČÍSLO"
+    ],
+    "PLACE OF BIRTH": [
+        r"PLACE OF BIRTH", r"BIRTHPLACE", r"VENDLIND", r"DZIMSANAS VIETA", r"MIESTO NARODENIA"
     ],
     "AUTHORITY": [
         r"AUTHORITY", r"AUTOR", r"IESTĀDE"
