@@ -33,26 +33,25 @@ warnings.filterwarnings('ignore')
 # LLM NER removed — using rule-based regex only
 extract_passport_fields_llm = None
 
-COUNTRY_FIELDS = {
+COUNTRY_REQUIRED_FIELDS = {
     "ALBANIA": [
-        "SURNAME", "GIVEN NAME", "NATIONALITY",
-        "PLACE OF BIRTH", "DATE OF BIRTH",
-        "DATE OF ISSUE", "DATE OF EXPIRY",
-        "AUTHORITY", "SEX", "ID CARD NO", "PERSONAL NO"
+        "SURNAME", "GIVEN NAME", "DATE OF BIRTH", "DATE OF ISSUE",
+        "DATE OF EXPIRY", "SEX", "ID CARD NO", "PERSONAL NO"
     ],
     "LATVIA": [
-        "SURNAME", "GIVEN NAME", "NATIONALITY",
-        "DATE OF BIRTH", "DATE OF ISSUE",
-        "DATE OF EXPIRY", "SEX",
-        "PASSPORT NO", "PERSONAL NO",
-        "PLACE OF BIRTH", "AUTHORITY", "HEIGHT"
+        "SURNAME", "GIVEN NAME", "DATE OF BIRTH", "DATE OF ISSUE",
+        "DATE OF EXPIRY", "SEX", "PASSPORT NO"
     ],
     "SLOVAKIA": [
-        "SURNAME", "GIVEN NAME", "NATIONALITY",
-        "SEX", "ID CARD NO", "PERSONAL NO",
-        "DATE OF BIRTH", "DATE OF ISSUE",
-        "DATE OF EXPIRY", "AUTHORITY"
+        "SURNAME", "GIVEN NAME", "DATE OF BIRTH", "DATE OF ISSUE",
+        "DATE OF EXPIRY", "SEX", "ID CARD NO", "PERSONAL NO"
     ]
+}
+
+COUNTRY_OPTIONAL_FIELDS = {
+    "ALBANIA": ["PLACE OF BIRTH", "AUTHORITY", "SIGNATURE"],
+    "LATVIA": ["HEIGHT", "PLACE OF BIRTH", "AUTHORITY", "PERSONAL NO", "SIGNATURE"],
+    "SLOVAKIA": ["AUTHORITY", "SIGNATURE"]
 }
 
 class DocumentForgeryDetector:
@@ -583,7 +582,8 @@ class DocumentForgeryDetector:
 
         def y_mid(b): return (b[1] + b[3]) // 2
         country = self.detect_country(self.ocr_full_text)
-        required_fields = COUNTRY_FIELDS.get(country, [])
+        required_fields = COUNTRY_REQUIRED_FIELDS.get(country, [])
+        optional_fields = COUNTRY_OPTIONAL_FIELDS.get(country, [])
         width, height = self.width, self.height
         def is_label_like(text):
             for patterns in LABEL_PATTERNS.values():
@@ -999,7 +999,7 @@ class DocumentForgeryDetector:
                 del entities[field]
 
         if required_fields:
-            allowed = set(required_fields) | {"MRZ LINE 1", "MRZ LINE 2"}
+            allowed = set(required_fields) | set(optional_fields) | {"MRZ LINE 1", "MRZ LINE 2"}
             entities = {k: v for k, v in entities.items() if k in allowed}
 
         # Finalize structured Named Entity Recognition (NER) output
@@ -1165,6 +1165,48 @@ class DocumentForgeryDetector:
         if any(k in text for k in ["SLOVENSK", "SLOVAKIA", "SVK"]):
             return "SLOVAKIA"
         return "UNKNOWN"
+
+    def validate_fields(self, country, entities):
+        """Run strict country-level field validation checks."""
+        issues = []
+
+        def get(field):
+            return entities.get(field, {}).get("text", "").upper()
+
+        sex_value = get("SEX")
+        if sex_value and sex_value not in ["M", "F"]:
+            issues.append("Invalid sex value")
+
+        if country == "ALBANIA":
+            if get("NATIONALITY") != "ALBANIAN":
+                issues.append("Invalid nationality")
+            if not re.fullmatch(r"[A-Z]\d{8}[A-Z]", get("PERSONAL NO")):
+                issues.append("Invalid Personal No format")
+            if not re.fullmatch(r"\d+", get("ID CARD NO")):
+                issues.append("Invalid ID Card No format")
+
+        elif country == "LATVIA":
+            if get("TYPE") not in ["P", "J"]:
+                issues.append("Invalid document type")
+            if get("ISSUING STATE CODE") != "LVA":
+                issues.append("Invalid issuing state")
+            if get("NATIONALITY") != "LATVIJAS":
+                issues.append("Invalid nationality")
+            if not re.fullmatch(r"[A-Z]{2}\d{7}", get("PASSPORT NO")):
+                issues.append("Invalid passport number")
+            personal_no = get("PERSONAL NO")
+            if personal_no and not re.fullmatch(r"\d{6}-\d{5}", personal_no):
+                issues.append("Invalid personal number")
+
+        elif country == "SLOVAKIA":
+            if get("NATIONALITY") != "SVK":
+                issues.append("Invalid nationality")
+            if not re.fullmatch(r"[A-Z]{2}\d{6}", get("ID CARD NO")):
+                issues.append("Invalid ID format")
+            if not re.fullmatch(r"\d{6}/\d{4}", get("PERSONAL NO")):
+                issues.append("Invalid personal number")
+
+        return issues
 
     def match_field_by_label(self, field, boxes):
         """Find the best value candidate around a detected label anchor."""
@@ -1657,6 +1699,10 @@ class DocumentForgeryDetector:
             
             # 2. Identify Fields and Values using rule-based regex NER
             self.identify_critical_entities_from_ocr(print_summary=False)
+            country = self.detect_country(self.ocr_full_text)
+            validation_issues = self.validate_fields(country, self.ner_entities)
+            if validation_issues:
+                self.forgery_issues.extend(validation_issues)
             self.save_ocr_json(self.image_path)
 
             # 3. Run physical and OCR box checks
