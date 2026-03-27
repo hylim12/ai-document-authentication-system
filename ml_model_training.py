@@ -13,7 +13,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
 
-DATASET_PATH = "ml_training_data.csv"
+DATASET_PATH = "dataset_outputs/train.csv"
 MODEL_DIR = Path("trained_models")
 MODEL_PATH = MODEL_DIR / "forged_document_rf_model.pkl"
 PREPROCESSOR_PATH = MODEL_DIR / "feature_preprocessor.pkl"
@@ -43,7 +43,7 @@ def load_dataset(path: str) -> pd.DataFrame:
 
 
 def build_training_columns(df: pd.DataFrame):
-    ignored = {"Document_ID", "Label"}
+    ignored = {"Document_ID", "Image_Name", "Label"}
     feature_columns = [c for c in df.columns if c not in ignored]
     categorical = [c for c in feature_columns if c == "Country_Code"]
     numeric = [c for c in feature_columns if c != "Country_Code"]
