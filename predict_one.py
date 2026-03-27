@@ -10,7 +10,7 @@ Functionality: Run single-image inference using the country-aware RandomForest p
 import os
 import pickle
 import pandas as pd
-from forged_document_detector import DocumentForgeryDetector, ensure_output_folder, extract_country_code
+from feature_engineering import DocumentForgeryDetector, ensure_output_folder, extract_country_code
 
 # Image to be predicted (unseen documents)
 NEW_IMAGE_PATH = "more_docs/alb_id_53_fake_6_46.jpg"
