@@ -8,6 +8,8 @@ Functionality: Image preprocessing, character segmentation, and statistical anom
 """
 
 # Import necessary libraries and modules
+import warnings
+warnings.filterwarnings("ignore")
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
@@ -25,6 +27,7 @@ try:
 except ImportError:
     PaddleOCR = None 
 warnings.filterwarnings('ignore')
+
 
 # LLM NER removed — using rule-based regex only
 extract_passport_fields_llm = None
