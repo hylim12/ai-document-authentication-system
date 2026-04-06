@@ -20,6 +20,7 @@ import datetime
 import json
 import unicodedata
 from prompts.regex_passport_patterns import LABEL_PATTERNS
+from utils.calibration import calibrate_entities, derive_nationality, compute_risk_score
 try:
     from paddleocr import PaddleOCR
 except ImportError:
@@ -105,6 +106,7 @@ class DocumentForgeryDetector:
         self.forgery_features = {}
         self.forgery_issues = []
         self.risk_score = 0.0
+        self.risk_issues = []
         self.llm_ner_disabled_reason = None
 
 
@@ -1149,6 +1151,11 @@ class DocumentForgeryDetector:
             }
             for k, v in entities.items()
         }
+
+        ocr_text_lines = [box["text"] for box in boxes if box.get("text")]
+        self.ner_entities = calibrate_entities(self.ner_entities, raw_lines=ocr_text_lines)
+        self.ner_entities = derive_nationality(self.ner_entities)
+        self.risk_score, self.risk_issues = compute_risk_score(self.ner_entities)
         self.ner_source = "REGEX"
 
         # Calculate Recall Metrics: Evaluate extraction completeness for forensic reporting.
@@ -1576,6 +1583,11 @@ class DocumentForgeryDetector:
         print("\n[NER FIELDS]")
         for k in sorted(self.ner_entities):
             print(f"  {k:18s}: {self.ner_entities[k]['text']}")
+        print("\n[CALIBRATED NER FIELDS]")
+        for k in sorted(self.ner_entities):
+            print(f"  {k:18s}: {self.ner_entities[k]['text']}")
+        print(f"\n[⚠️ RISK SCORE]: {int(self.risk_score)}")
+        print(f"[⚠️ ISSUES]: {self.risk_issues}")
         if self.missing_ner_fields:
             print("  Missing fields:", ", ".join(self.missing_ner_fields))
             print(f"  NER Recall: {self.ner_metrics.get('ner_recall', 0.0):.2f}")
