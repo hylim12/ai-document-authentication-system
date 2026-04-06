@@ -1,6 +1,7 @@
 """Utilities for post-NER semantic calibration and AML risk scoring."""
 
 from copy import deepcopy
+import re
 
 
 def _entity_text(value):
@@ -25,6 +26,31 @@ def _set_entity_text(entities, field, new_text):
         }
 
 
+def is_valid_personal_no(value):
+    """
+    Valid format: 1 letter followed by at least 6 digits.
+    Example: A1234567
+    """
+    if not value:
+        return False
+
+    value = str(value).strip().upper()
+    return bool(re.match(r"^[A-Z]\d{6,}$", value))
+
+
+def clean_personal_no(value):
+    """
+    Clean OCR noise while preserving valid format.
+    """
+    if not value:
+        return None
+
+    value = str(value).upper().strip()
+    # Remove unwanted characters but keep letters + digits
+    value = re.sub(r"[^A-Z0-9]", "", value)
+    return value or None
+
+
 def calibrate_entities(entities, raw_lines=None):
     """
     Post-process NER outputs to fix misaligned or invalid fields.
@@ -42,17 +68,29 @@ def calibrate_entities(entities, raw_lines=None):
         if "surname" in val or "name" in val:
             corrected.pop("GIVEN NAME", None)
 
-    # RULE 2: PERSONAL NO must be numeric
+    # RULE 2: PERSONAL NO must be alphanumeric (1 letter + >=6 digits)
     personal_no = _entity_text(corrected.get("PERSONAL NO"))
-    if personal_no and not str(personal_no).isdigit():
-        corrected.pop("PERSONAL NO", None)
+    if personal_no:
+        cleaned = clean_personal_no(personal_no)
+        if is_valid_personal_no(cleaned):
+            _set_entity_text(corrected, "PERSONAL NO", cleaned)
+        else:
+            _set_entity_text(corrected, "PERSONAL NO", None)
 
     # RULE 3: SURNAME must be alphabetic
     surname = _entity_text(corrected.get("SURNAME"))
     if surname and not str(surname).isalpha():
         corrected.pop("SURNAME", None)
 
-    # RULE 4: Recover GIVEN NAME using SURNAME context
+    # RULE 4: Recover PERSONAL NO from OCR lines when missing
+    if not _entity_text(corrected.get("PERSONAL NO")) and raw_lines:
+        for line in raw_lines:
+            matches = re.findall(r"[A-Z]\d{6,}", str(line).upper())
+            if matches:
+                _set_entity_text(corrected, "PERSONAL NO", matches[0])
+                break
+
+    # RULE 5: Recover GIVEN NAME using SURNAME context
     if not corrected.get("GIVEN NAME") and raw_lines:
         surname = _entity_text(corrected.get("SURNAME"))
         if surname:
@@ -66,6 +104,16 @@ def calibrate_entities(entities, raw_lines=None):
                     if len(parts) >= 2:
                         _set_entity_text(corrected, "GIVEN NAME", parts[0])
                         break
+
+    # RULE 6: Keep PERSONAL NO distinct from ID CARD NO when comparable
+    personal_no = _entity_text(corrected.get("PERSONAL NO"))
+    id_card_no = _entity_text(corrected.get("ID CARD NO"))
+    if personal_no and id_card_no:
+        personal_no = str(personal_no)
+        id_card_no = str(id_card_no)
+        if len(personal_no) > 1 and personal_no[1:] == id_card_no:
+            # likely same number -> valid case, keep both
+            pass
 
     return corrected
 
