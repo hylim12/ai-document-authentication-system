@@ -643,7 +643,7 @@ class DocumentForgeryDetector:
             if candidate:
                 entities[field] = candidate
 
-        # DIRECT LABEL → VALUE EXTRACTION (STRONG)
+        # DIRECT LABEL → VALUE EXTRACTION (SCORING-BASED)
         for i, box in enumerate(boxes):
             for pattern, field in label_map.items():
                 if re.search(pattern, box["norm"]):
@@ -655,13 +655,15 @@ class DocumentForgeryDetector:
                         dy = candidate["bbox"][1] - box["bbox"][3]
                         dx = candidate["bbox"][0] - box["bbox"][0]
 
-                        # Prefer directly below or right
-                        # STRICT MATCHING (NO GUESSING)
-                        # PRIORITY: RIGHT → BELOW → NEAREST
-                        is_right = 0 <= dx <= 250 and abs(dy) <= 30
-                        is_below = 0 <= dy <= 80 and abs(dx) <= 100
+                        score = 0
+                        if 0 <= dx <= 400:
+                            score += 2
+                        if abs(dy) <= 80:
+                            score += 2
+                        if 0 <= dy <= 150:
+                            score += 1
 
-                        if not (is_right or is_below):
+                        if score < 2:
                             continue
 
                         if is_label_like(candidate["norm"]):
@@ -886,7 +888,7 @@ class DocumentForgeryDetector:
                     entities["AUTHORITY"] = box
                     break
 
-        # 🚀 COUNTRY-BASED NATIONALITY
+        # 🚀 COUNTRY-BASED NATIONALITY (set before cleanup to avoid later deletion)
         if country == "LATVIA":
             entities["NATIONALITY"] = {"text": "LVA", "bbox": (0, 0, 0, 0), "confidence": 0.9}
         elif country == "ALBANIA":
@@ -972,6 +974,69 @@ class DocumentForgeryDetector:
                 # Keep SURNAME, remove GIVEN NAME
                 del entities["GIVEN NAME"]
 
+        # STRONG FALLBACK: infer GIVEN NAME from nearby SURNAME line
+        if "SURNAME" in entities and "GIVEN NAME" not in entities:
+            surname_box = entities["SURNAME"]["bbox"]
+            sy = y_mid(surname_box)
+            surname_text = entities["SURNAME"]["text"].strip().upper()
+
+            best_candidate = None
+            best_score = -999
+            for candidate in boxes:
+                ctext = candidate["text"].strip()
+                ctext_upper = ctext.upper()
+                if not ctext or ctext_upper == surname_text:
+                    continue
+                if is_label_like(candidate["norm"]):
+                    continue
+                if not is_valid_for_field("GIVEN NAME", ctext):
+                    continue
+
+                cy = y_mid(candidate["bbox"])
+                dx = candidate["bbox"][0] - surname_box[2]
+                dy = cy - sy
+
+                if abs(dy) > 60:
+                    continue
+                if not (-120 <= dx <= 350):
+                    continue
+
+                score = self._score_candidate("GIVEN NAME", candidate, entities["SURNAME"])
+                if score > best_score:
+                    best_score = score
+                    best_candidate = candidate
+
+            if best_candidate:
+                entities["GIVEN NAME"] = best_candidate
+
+        # STRONG FALLBACK: relaxed PERSONAL NO detection (alphanumeric, OCR-noise tolerant)
+        if "PERSONAL NO" not in entities:
+            best_candidate = None
+            best_score = -999
+            for candidate in boxes:
+                if is_label_like(candidate["norm"]):
+                    continue
+                cleaned = re.sub(r'[^A-Z0-9]', '', candidate["text"].upper())
+                if not (7 <= len(cleaned) <= 12):
+                    continue
+                if not re.fullmatch(r'[A-Z0-9]{7,12}', cleaned):
+                    continue
+                # avoid obvious date/height-like noise
+                if re.fullmatch(r'\d{3}', cleaned):
+                    continue
+                if re.fullmatch(r'\d{8}', cleaned):
+                    continue
+
+                score = candidate.get("confidence", 0)
+                if any(ch.isalpha() for ch in cleaned):
+                    score += 0.5
+                if score > best_score:
+                    best_score = score
+                    best_candidate = candidate
+
+            if best_candidate:
+                entities["PERSONAL NO"] = best_candidate
+
         # 🚫 FINAL CLEANUP PASS
         for field, data in list(entities.items()):
             if self._is_header_text(data["text"]):
@@ -993,6 +1058,14 @@ class DocumentForgeryDetector:
         for field, data in list(entities.items()):
             if not self._is_valid_for_field(field, data["text"]):
                 del entities[field]
+
+        # Keep deterministic country nationality after cleanup.
+        if country == "LATVIA" and "NATIONALITY" not in entities:
+            entities["NATIONALITY"] = {"text": "LVA", "bbox": (0, 0, 0, 0), "confidence": 0.9}
+        elif country == "ALBANIA" and "NATIONALITY" not in entities:
+            entities["NATIONALITY"] = {"text": "ALBANIAN", "bbox": (0, 0, 0, 0), "confidence": 0.9}
+        elif country == "SLOVAKIA" and "NATIONALITY" not in entities:
+            entities["NATIONALITY"] = {"text": "SVK", "bbox": (0, 0, 0, 0), "confidence": 0.9}
 
         if required_fields:
             allowed = set(required_fields) | set(optional_fields) | {"MRZ LINE 1", "MRZ LINE 2"}
@@ -1351,17 +1424,16 @@ class DocumentForgeryDetector:
             return text in ["M", "F"]
 
         if field == "SURNAME":
-            return raw_text.istitle() and len(raw_text.split()) == 1
+            cleaned = re.sub(r'[^A-Z ]', '', text)
+            return len(cleaned.strip()) >= 2
 
         if field == "GIVEN NAME":
-            return raw_text.istitle() and len(raw_text.split()) <= 2
+            cleaned = re.sub(r'[^A-Z ]', '', text)
+            return len(cleaned.strip()) >= 2
 
         if field == "PERSONAL NO":
-            return bool(
-                re.fullmatch(r'[A-Z]\d{7,9}[A-Z]', text) or
-                re.fullmatch(r'\d{6}-\d{5}', text) or
-                re.fullmatch(r'\d{6}/\d{4}', text)
-            )
+            cleaned = re.sub(r'[^A-Z0-9]', '', text)
+            return len(cleaned) >= 6
 
         if field == "PLACE OF BIRTH":
             return not bool(re.search(r'\d', text))
