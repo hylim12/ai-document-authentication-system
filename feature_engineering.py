@@ -1156,9 +1156,20 @@ class DocumentForgeryDetector:
         }
 
         ocr_text_lines = [box["text"] for box in boxes if box.get("text")]
-        self.ner_entities = calibrate_entities(self.ner_entities, raw_lines=ocr_text_lines)
+        country = self.detect_country(self.ocr_full_text)
+
+        self.ner_entities = calibrate_entities(
+            self.ner_entities,
+            country=country,
+            raw_lines=ocr_text_lines
+        )
+
         self.ner_entities = derive_nationality(self.ner_entities)
-        self.risk_score, self.risk_issues = compute_risk_score(self.ner_entities)
+
+        self.risk_score, self.risk_issues = compute_risk_score(
+            self.ner_entities,
+            country=country
+        )
         self.ner_source = "REGEX"
 
         # Calculate Recall Metrics: Evaluate extraction completeness for forensic reporting.
