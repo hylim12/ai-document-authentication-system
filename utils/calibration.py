@@ -3,6 +3,14 @@
 from copy import deepcopy
 import re
 
+from utils.validators import (
+    is_valid_document_no,
+    is_valid_nationality,
+    is_valid_personal_no,
+    is_valid_sex,
+    normalize,
+)
+
 
 def _entity_text(value):
     """Return entity text regardless of whether value is dict or string."""
@@ -26,63 +34,14 @@ def _set_entity_text(entities, field, new_text):
         }
 
 
-def validate_personal_no(value, country):
-    """Validate PERSONAL NO using country-specific formats."""
-    value = re.sub(r'[^A-Z0-9/-]', '', str(value or '').upper())
-
-    if country == "ALBANIA":
-        return bool(re.fullmatch(r'[A-Z]\d{8}[A-Z]', value))
-
-    elif country == "LATVIA":
-        return bool(re.fullmatch(r'\d{6}-\d{5}', value))
-
-    elif country == "SLOVAKIA":
-        return bool(re.fullmatch(r'\d{6}/\d{4}', value))
-
-    return False
-
-
-def validate_id_card(value, country):
-    """Validate ID/PASSPORT number using country-specific formats."""
-    value = re.sub(r'[^A-Z0-9]', '', str(value or '').upper())
-
-    if country == "ALBANIA":
-        return bool(re.fullmatch(r'\d+', value))
-
-    elif country == "LATVIA":
-        return bool(re.fullmatch(r'[A-Z]{2}\d{7}', value))
-
-    elif country == "SLOVAKIA":
-        return bool(re.fullmatch(r'[A-Z]{2}\d{6}', value))
-
-    return False
-
-
 def clean_personal_no(value):
     """Clean OCR noise while preserving valid format characters."""
     if not value:
         return None
 
-    value = str(value).upper().strip()
+    value = normalize(value)
     value = re.sub(r"[^A-Z0-9/-]", "", value)
     return value or None
-
-
-def enforce_nationality(entities, country):
-    """Strictly enforce expected nationality for supported countries."""
-    nat = _entity_text(entities.get("NATIONALITY"))
-
-    expected = {
-        "ALBANIA": "ALBANIAN",
-        "LATVIA": "LATVIJAS",
-        "SLOVAKIA": "SVK"
-    }
-
-    if nat:
-        if nat.upper() != expected.get(country, ""):
-            entities["NATIONALITY"] = None
-
-    return entities
 
 
 def calibrate_entities(entities, country=None, raw_lines=None):
@@ -149,15 +108,17 @@ def calibrate_entities(entities, country=None, raw_lines=None):
     # COUNTRY-AWARE VALIDATION
     if country:
         pno = _entity_text(corrected.get("PERSONAL NO"))
-        if pno and not validate_personal_no(pno, country):
+        if pno and not is_valid_personal_no(pno, country):
             corrected.pop("PERSONAL NO", None)
 
         id_val = _entity_text(corrected.get("ID CARD NO")) or _entity_text(corrected.get("PASSPORT NO"))
-        if id_val and not validate_id_card(id_val, country):
+        if id_val and not is_valid_document_no(id_val, country):
             corrected.pop("ID CARD NO", None)
             corrected.pop("PASSPORT NO", None)
 
-        corrected = enforce_nationality(corrected, country)
+        nat = _entity_text(corrected.get("NATIONALITY"))
+        if nat and not is_valid_nationality(nat, country):
+            corrected.pop("NATIONALITY", None)
 
     return corrected
 
@@ -192,17 +153,17 @@ def compute_risk_score(entities, country=None):
             issues.append(f"{field} missing")
 
     if country == "ALBANIA":
-        if get("NATIONALITY") != "ALBANIAN":
+        if not is_valid_nationality(get("NATIONALITY"), country):
             risk += 4
-            issues.append("Forged nationality (ALBANIA)")
+            issues.append(f"Forged nationality ({country})")
 
-        if not validate_personal_no(get("PERSONAL NO"), country):
+        if not is_valid_personal_no(get("PERSONAL NO"), country):
             risk += 3
-            issues.append("Invalid Personal No (ALBANIA)")
+            issues.append("Invalid Personal No")
 
-        if not validate_id_card(get("ID CARD NO"), country):
+        if not is_valid_document_no(get("ID CARD NO") or get("PASSPORT NO"), country):
             risk += 3
-            issues.append("Invalid ID Card No (ALBANIA)")
+            issues.append("Invalid Document Number")
 
         pob = get("PLACE OF BIRTH") or ""
         if "ALB" not in pob.upper():
@@ -210,32 +171,32 @@ def compute_risk_score(entities, country=None):
             issues.append("Invalid Place of Birth (ALBANIA)")
 
     elif country == "LATVIA":
-        if get("NATIONALITY") != "LATVIJAS":
+        if not is_valid_nationality(get("NATIONALITY"), country):
             risk += 4
-            issues.append("Forged nationality (LATVIA)")
+            issues.append(f"Forged nationality ({country})")
 
-        if not validate_id_card(get("PASSPORT NO"), country):
+        if not is_valid_document_no(get("ID CARD NO") or get("PASSPORT NO"), country):
             risk += 3
-            issues.append("Invalid Passport No")
+            issues.append("Invalid Document Number")
 
-        if not validate_personal_no(get("PERSONAL NO"), country):
+        if not is_valid_personal_no(get("PERSONAL NO"), country):
             risk += 3
             issues.append("Invalid Personal No")
 
-        if get("SEX") not in ["M", "F"]:
+        if not is_valid_sex(get("SEX")):
             risk += 1
             issues.append("Invalid sex")
 
     elif country == "SLOVAKIA":
-        if get("NATIONALITY") != "SVK":
+        if not is_valid_nationality(get("NATIONALITY"), country):
             risk += 4
-            issues.append("Forged nationality (SLOVAKIA)")
+            issues.append(f"Forged nationality ({country})")
 
-        if not validate_id_card(get("ID CARD NO"), country):
+        if not is_valid_document_no(get("ID CARD NO") or get("PASSPORT NO"), country):
             risk += 3
-            issues.append("Invalid ID Card No")
+            issues.append("Invalid Document Number")
 
-        if not validate_personal_no(get("PERSONAL NO"), country):
+        if not is_valid_personal_no(get("PERSONAL NO"), country):
             risk += 3
             issues.append("Invalid Personal No")
 
