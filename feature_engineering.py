@@ -849,6 +849,32 @@ class DocumentForgeryDetector:
                 if "SURNAME" in entities:
                     break
 
+        # 🚀 GIVEN NAME DERIVATION FROM SAME LINE
+        if "SURNAME" in entities and "GIVEN NAME" not in entities:
+            surname = entities["SURNAME"]["text"]
+
+            for box in boxes:
+                text = box["text"].strip()
+
+                # Skip same word
+                if text == surname:
+                    continue
+
+                # Look for multi-word name (e.g. "John Agani")
+                if surname in text and len(text.split()) >= 2:
+                    parts = text.split()
+
+                    # Assume last word = surname
+                    if parts[-1] == surname:
+                        given_name = " ".join(parts[:-1])
+
+                        entities["GIVEN NAME"] = {
+                            "text": given_name,
+                            "bbox": box["bbox"],
+                            "confidence": 0.85
+                        }
+                        break
+
         for box in boxes:
             text = box["text"].upper()
 
@@ -863,6 +889,27 @@ class DocumentForgeryDetector:
         for box in boxes:
             if "," in box["text"] and not any(char.isdigit() for char in box["text"]):
                 assign_if_valid("PLACE OF BIRTH", box)
+
+        # 🚀 DERIVE NATIONALITY FROM PLACE OF BIRTH
+        if "NATIONALITY" not in entities and "PLACE OF BIRTH" in entities:
+            pob_text = entities["PLACE OF BIRTH"]["text"].upper()
+
+            # Look for country codes
+            match = re.search(r'\b(ALB|LVA|SVK)\b', pob_text)
+            if match:
+                country_code = match.group(1)
+
+                nationality_map = {
+                    "ALB": "ALBANIAN",
+                    "LVA": "LVA",
+                    "SVK": "SVK"
+                }
+
+                entities["NATIONALITY"] = {
+                    "text": nationality_map.get(country_code, country_code),
+                    "bbox": entities["PLACE OF BIRTH"]["bbox"],
+                    "confidence": 0.85
+                }
 
         # AUTHORITY (IMPROVED)
         for i, box in enumerate(boxes):
@@ -889,11 +936,11 @@ class DocumentForgeryDetector:
                     break
 
         # 🚀 COUNTRY-BASED NATIONALITY (set before cleanup to avoid later deletion)
-        if country == "LATVIA":
+        if country == "LATVIA" and "NATIONALITY" not in entities:
             entities["NATIONALITY"] = {"text": "LVA", "bbox": (0, 0, 0, 0), "confidence": 0.9}
-        elif country == "ALBANIA":
+        elif country == "ALBANIA" and "NATIONALITY" not in entities:
             entities["NATIONALITY"] = {"text": "ALBANIAN", "bbox": (0, 0, 0, 0), "confidence": 0.9}
-        elif country == "SLOVAKIA":
+        elif country == "SLOVAKIA" and "NATIONALITY" not in entities:
             entities["NATIONALITY"] = {"text": "SVK", "bbox": (0, 0, 0, 0), "confidence": 0.9}
 
         if not all(k in entities for k in ["DATE OF BIRTH", "DATE OF ISSUE", "DATE OF EXPIRY"]):
@@ -1008,6 +1055,28 @@ class DocumentForgeryDetector:
 
             if best_candidate:
                 entities["GIVEN NAME"] = best_candidate
+
+        # 🚀 FALLBACK GIVEN NAME FROM NEARBY TEXT
+        if "SURNAME" in entities and "GIVEN NAME" not in entities:
+            surname_box = entities["SURNAME"]["bbox"]
+
+            for box in boxes:
+                text = box["text"].strip()
+
+                if text == entities["SURNAME"]["text"]:
+                    continue
+
+                # Must look like a name
+                if not re.fullmatch(r'[A-Za-z ]{2,}', text):
+                    continue
+
+                # Check vertical alignment
+                dy = abs((box["bbox"][1] + box["bbox"][3]) / 2 -
+                         (surname_box[1] + surname_box[3]) / 2)
+
+                if dy < 40:
+                    entities["GIVEN NAME"] = box
+                    break
 
         # STRONG FALLBACK: relaxed PERSONAL NO detection (alphanumeric, OCR-noise tolerant)
         if "PERSONAL NO" not in entities:
