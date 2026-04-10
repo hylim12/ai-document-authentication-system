@@ -84,20 +84,16 @@ def calibrate_entities(entities, country=None, raw_lines=None):
     # RULE 5: Recover GIVEN NAME using SURNAME context
     if not corrected.get("GIVEN NAME") and raw_lines:
         surname = _entity_text(corrected.get("SURNAME"))
-        if surname:
-            surname_lower = str(surname).lower()
-            for line in raw_lines:
-                line_text = str(line).strip()
-                if not line_text:
-                    continue
-                if surname_lower in line_text.lower():
-                    parts = line_text.split()
-                    for p in parts:
-                        if p.lower() != surname_lower and p.isalpha() and len(p) > 2:
-                            _set_entity_text(corrected, "GIVEN NAME", p)
-                            break
-                    if corrected.get("GIVEN NAME"):
+        for line in raw_lines:
+            words = re.findall(r"[A-Za-z]{3,}", str(line))
+
+            if len(words) >= 2:
+                for w in words:
+                    if w.lower() != str(surname).lower():
+                        _set_entity_text(corrected, "GIVEN NAME", w)
                         break
+            if corrected.get("GIVEN NAME"):
+                break
 
     # RULE 6: Keep PERSONAL NO distinct from ID CARD NO when comparable
     personal_no = _entity_text(corrected.get("PERSONAL NO"))
