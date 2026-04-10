@@ -697,36 +697,32 @@ class DocumentForgeryDetector:
                         used.add(j)
                         break
 
-        # 🚀 STRONG RULE: GIVEN NAME extraction using vertical proximity
+        # 🚀 ADVANCED GIVEN NAME EXTRACTION (LAYOUT-AWARE)
         for i, box in enumerate(boxes):
             if "GIVEN" in box["norm"] or "EMRI" in box["norm"]:
-
-                label_y_bottom = box["bbox"][3]
-
                 best_candidate = None
-                best_distance = float("inf")
+                best_score = -999
 
                 for j, candidate in enumerate(boxes):
                     if j == i:
                         continue
 
-                    dy = candidate["bbox"][1] - label_y_bottom
-                    dx = abs(candidate["bbox"][0] - box["bbox"][0])
+                    if is_label_like(candidate["norm"]):
+                        continue
 
-                    # prioritize value BELOW label
-                    if 0 <= dy <= 120 and dx < 200:
+                    if len(candidate["text"]) < 2:
+                        continue
 
-                        if is_label_like(candidate["norm"]):
-                            continue
+                    score = self._spatial_score(box["bbox"], candidate["bbox"])
+                    if self._looks_like_name(candidate["text"]):
+                        score += 2
 
-                        if len(candidate["text"]) < 2:
-                            continue
+                    # 🚀 NO STRICT VALIDATION HERE (important for recall)
+                    if score > best_score:
+                        best_score = score
+                        best_candidate = candidate
 
-                        if dy < best_distance:
-                            best_candidate = candidate
-                            best_distance = dy
-
-                if best_candidate:
+                if best_candidate and best_score >= 5:
                     entities["GIVEN NAME"] = best_candidate
 
         # 🚀 FALLBACK RULES
@@ -1508,6 +1504,36 @@ class DocumentForgeryDetector:
 
     def _is_alphanumeric_id(self, text):
         return bool(re.fullmatch(r'[A-Z0-9]{6,}', str(text or "")))
+
+    def _looks_like_name(self, text):
+        return bool(re.fullmatch(r"[A-Za-z]{3,}", str(text or "")))
+
+    def _spatial_score(self, label_box, candidate_box):
+        """
+        Compute spatial relevance score between label and candidate.
+        Higher score = better match.
+        """
+        lx1, ly1, lx2, ly2 = label_box
+        cx1, cy1, cx2, cy2 = candidate_box
+
+        dy = cy1 - ly2
+        dx = abs(cx1 - lx1)
+
+        score = 0
+
+        # Strong vertical alignment (most important)
+        if 0 <= dy <= 120:
+            score += 5
+
+        # Horizontal alignment
+        if dx < 200:
+            score += 3
+
+        # Penalize if above label
+        if dy < 0:
+            score -= 5
+
+        return score
 
     def _score_candidate(self, field, candidate, anchor=None):
         score = 0
