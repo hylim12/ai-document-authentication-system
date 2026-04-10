@@ -710,12 +710,22 @@ class DocumentForgeryDetector:
                     if is_label_like(candidate["norm"]):
                         continue
 
-                    if len(candidate["text"]) < 2:
+                    # 🚨 Explicit blacklist for label-like tokens
+                    if any(x in candidate["norm"] for x in ["MBIEMRI", "EMRI", "NAME", "SURNAME"]):
+                        continue
+
+                    # 🚨 Reject short/noisy tokens
+                    if len(candidate["text"]) < 3:
+                        continue
+
+                    # 🚨 HARD CONSTRAINT: candidate MUST be below label
+                    dy = candidate["bbox"][1] - box["bbox"][3]
+                    if dy < 0:
                         continue
 
                     score = self._spatial_score(box["bbox"], candidate["bbox"])
                     if self._looks_like_name(candidate["text"]):
-                        score += 2
+                        score += 5  # stronger boost
 
                     # 🚀 NO STRICT VALIDATION HERE (important for recall)
                     if score > best_score:
