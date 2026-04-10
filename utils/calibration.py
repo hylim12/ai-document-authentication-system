@@ -8,6 +8,7 @@ from utils.validators import (
     is_valid_nationality,
     is_valid_personal_no,
     is_valid_sex,
+    normalize_nationality,
     normalize,
 )
 
@@ -117,8 +118,12 @@ def calibrate_entities(entities, country=None, raw_lines=None):
             corrected.pop("PASSPORT NO", None)
 
         nat = _entity_text(corrected.get("NATIONALITY"))
-        if nat and not is_valid_nationality(nat, country):
-            corrected.pop("NATIONALITY", None)
+        if nat:
+            normalized_nat = normalize_nationality(nat, country)
+            _set_entity_text(corrected, "NATIONALITY", normalized_nat)
+
+            if not is_valid_nationality(normalized_nat, country):
+                corrected.pop("NATIONALITY", None)
 
     return corrected
 
@@ -153,7 +158,8 @@ def compute_risk_score(entities, country=None):
             issues.append(f"{field} missing")
 
     if country == "ALBANIA":
-        if not is_valid_nationality(get("NATIONALITY"), country):
+        nat = normalize_nationality(get("NATIONALITY"), country)
+        if not is_valid_nationality(nat, country):
             risk += 4
             issues.append(f"Forged nationality ({country})")
 
@@ -171,7 +177,8 @@ def compute_risk_score(entities, country=None):
             issues.append("Invalid Place of Birth (ALBANIA)")
 
     elif country == "LATVIA":
-        if not is_valid_nationality(get("NATIONALITY"), country):
+        nat = normalize_nationality(get("NATIONALITY"), country)
+        if not is_valid_nationality(nat, country):
             risk += 4
             issues.append(f"Forged nationality ({country})")
 
@@ -188,7 +195,8 @@ def compute_risk_score(entities, country=None):
             issues.append("Invalid sex")
 
     elif country == "SLOVAKIA":
-        if not is_valid_nationality(get("NATIONALITY"), country):
+        nat = normalize_nationality(get("NATIONALITY"), country)
+        if not is_valid_nationality(nat, country):
             risk += 4
             issues.append(f"Forged nationality ({country})")
 
