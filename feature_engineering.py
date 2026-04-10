@@ -61,6 +61,8 @@ class DocumentForgeryDetector:
         self.image_path = image_path
         self.ocr_engine = ocr_engine
         self.log = []
+        self.ground_truth_label = self.get_ground_truth_label()
+        self.log.append(f"- Ground Truth Label: {self.ground_truth_label}")
 
         if not os.path.exists(image_path):
             raise FileNotFoundError(f"Image file not found: {image_path}")
@@ -111,6 +113,18 @@ class DocumentForgeryDetector:
         self.risk_score = 0.0
         self.risk_issues = []
         self.llm_ner_disabled_reason = None
+
+    def get_ground_truth_label(self):
+        """
+        Determines ground truth label from filename.
+        If 'fake' in filename → FORGED
+        Else → GENUINE
+        """
+        filename = os.path.basename(self.image_path).lower()
+
+        if "fake" in filename:
+            return "FORGED"
+        return "GENUINE"
 
 
 
@@ -880,16 +894,40 @@ class DocumentForgeryDetector:
                         }
                         break
 
-        for box in boxes:
-            text = box["text"].upper()
+        # -------------------------
+        # NATIONALITY EXTRACTION (STRONG)
+        # -------------------------
+        for i, box in enumerate(boxes):
+            text = box["text"].strip().upper()
 
-            if "SIGNATURE" in text or "FIRMA" in text:
+            if self._is_header_text(text):
                 continue
 
-            if "/" in text and len(text) < 25:
-                assign_if_valid("NATIONALITY", box)
-            elif re.fullmatch(r'[A-Z]{3}', text):  # MRZ style
-                assign_if_valid("NATIONALITY", box)
+            # MRZ (strongest)
+            if re.fullmatch(r'[A-Z]{3}', text):
+                entities["NATIONALITY"] = {
+                    "text": text,
+                    "bbox": box["bbox"],
+                    "confidence": 0.95
+                }
+                continue
+
+            # Label-based detection
+            if any(keyword in text for keyword in ["NATIONALITY", "NATION", "SHTET"]):
+                for candidate in boxes:
+                    dy = candidate["bbox"][1] - box["bbox"][3]
+                    dx = abs(candidate["bbox"][0] - box["bbox"][0])
+
+                    if 0 <= dy <= 80 and dx <= 200:
+                        val = candidate["text"].strip().upper()
+
+                        if not self._is_header_text(val) and not re.search(r'\d', val):
+                            entities["NATIONALITY"] = {
+                                "text": val,
+                                "bbox": candidate["bbox"],
+                                "confidence": 0.9
+                            }
+                            break
 
         for box in boxes:
             if "," in box["text"] and not any(char.isdigit() for char in box["text"]):
@@ -940,13 +978,22 @@ class DocumentForgeryDetector:
                     entities["AUTHORITY"] = box
                     break
 
-        # 🚀 COUNTRY-BASED NATIONALITY (set before cleanup to avoid later deletion)
-        if country == "LATVIA" and "NATIONALITY" not in entities:
-            entities["NATIONALITY"] = {"text": "LVA", "bbox": (0, 0, 0, 0), "confidence": 0.9}
-        elif country == "ALBANIA" and "NATIONALITY" not in entities:
-            entities["NATIONALITY"] = {"text": "ALBANIAN", "bbox": (0, 0, 0, 0), "confidence": 0.9}
-        elif country == "SLOVAKIA" and "NATIONALITY" not in entities:
-            entities["NATIONALITY"] = {"text": "SVK", "bbox": (0, 0, 0, 0), "confidence": 0.9}
+        # -------------------------
+        # FORCE NATIONALITY FROM COUNTRY
+        # -------------------------
+        country_map = {
+            "LATVIA": "LVA",
+            "ALBANIA": "ALBANIAN",
+            "SLOVAKIA": "SVK"
+        }
+
+        if "NATIONALITY" not in entities or entities["NATIONALITY"]["text"] == "UNKNOWN":
+            if country in country_map:
+                entities["NATIONALITY"] = {
+                    "text": country_map[country],
+                    "bbox": (0, 0, 0, 0),
+                    "confidence": 0.99
+                }
 
         if not all(k in entities for k in ["DATE OF BIRTH", "DATE OF ISSUE", "DATE OF EXPIRY"]):
             # STEP 1: Collect ALL date candidates
@@ -1133,13 +1180,31 @@ class DocumentForgeryDetector:
             if not self._is_valid_for_field(field, data["text"]):
                 del entities[field]
 
-        # Keep deterministic country nationality after cleanup.
-        if country == "LATVIA" and "NATIONALITY" not in entities:
-            entities["NATIONALITY"] = {"text": "LVA", "bbox": (0, 0, 0, 0), "confidence": 0.9}
-        elif country == "ALBANIA" and "NATIONALITY" not in entities:
-            entities["NATIONALITY"] = {"text": "ALBANIAN", "bbox": (0, 0, 0, 0), "confidence": 0.9}
-        elif country == "SLOVAKIA" and "NATIONALITY" not in entities:
-            entities["NATIONALITY"] = {"text": "SVK", "bbox": (0, 0, 0, 0), "confidence": 0.9}
+        # -------------------------
+        # FORCE NATIONALITY FROM COUNTRY
+        # -------------------------
+        country_map = {
+            "LATVIA": "LVA",
+            "ALBANIA": "ALBANIAN",
+            "SLOVAKIA": "SVK"
+        }
+
+        if "NATIONALITY" not in entities or entities["NATIONALITY"]["text"] == "UNKNOWN":
+            if country in country_map:
+                entities["NATIONALITY"] = {
+                    "text": country_map[country],
+                    "bbox": (0, 0, 0, 0),
+                    "confidence": 0.99
+                }
+
+        # 🚨 FINAL FAILSAFE
+        if "NATIONALITY" not in entities or not entities["NATIONALITY"]["text"].strip():
+            fallback_nationality = country if country and country != "UNKNOWN" else "UNSPECIFIED"
+            entities["NATIONALITY"] = {
+                "text": fallback_nationality,
+                "bbox": (0, 0, 0, 0),
+                "confidence": 0.5
+            }
 
         if required_fields:
             allowed = set(required_fields) | set(optional_fields) | {"MRZ LINE 1", "MRZ LINE 2"}
@@ -1165,6 +1230,13 @@ class DocumentForgeryDetector:
         )
 
         self.ner_entities = derive_nationality(self.ner_entities)
+        if "NATIONALITY" not in self.ner_entities or not self.ner_entities["NATIONALITY"].get("text", "").strip() or self.ner_entities["NATIONALITY"].get("text", "").strip().upper() == "UNKNOWN":
+            fallback_nationality = country if country and country != "UNKNOWN" else "UNSPECIFIED"
+            self.ner_entities["NATIONALITY"] = {
+                "text": fallback_nationality,
+                "bbox": (0, 0, 0, 0),
+                "confidence": 0.99
+            }
 
         self.risk_score, self.risk_issues = compute_risk_score(
             self.ner_entities,
@@ -1913,6 +1985,7 @@ class DocumentForgeryDetector:
             verdict = "AUTHENTIC"
             show_anomalies = False
 
+        prediction_label = self.final_verdict if self.final_verdict else verdict
         is_forged = verdict == "FORGED"
         vis = self.display_image.copy()
 
@@ -1935,6 +2008,43 @@ class DocumentForgeryDetector:
                 if a.get("severity") == "high" and "char" in a:
                     x1, y1, x2, y2 = a['char']['bbox']
                     cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 0, 255), 3)
+
+        label_text = f"GROUND TRUTH: {self.ground_truth_label}"
+        color = (0, 255, 0) if self.ground_truth_label == "GENUINE" else (0, 0, 255)
+        cv2.putText(
+            vis,
+            label_text,
+            (30, 50),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.2,
+            color,
+            3,
+            cv2.LINE_AA
+        )
+
+        pred_text = f"PREDICTION: {prediction_label}"
+        cv2.putText(
+            vis,
+            pred_text,
+            (30, 100),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.2,
+            (255, 255, 0),
+            3,
+            cv2.LINE_AA
+        )
+
+        if self.ground_truth_label != prediction_label:
+            cv2.putText(
+                vis,
+                "MISCLASSIFIED",
+                (30, 150),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.2,
+                (0, 0, 255),
+                3,
+                cv2.LINE_AA
+            )
 
         orig_rgb = cv2.cvtColor(self.display_image, cv2.COLOR_BGR2RGB)
         vis_rgb  = cv2.cvtColor(vis, cv2.COLOR_BGR2RGB)
