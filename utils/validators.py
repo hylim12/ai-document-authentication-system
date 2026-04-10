@@ -10,15 +10,41 @@ def normalize(value):
     return re.sub(r"\s+", " ", str(value).strip().upper())
 
 
-def is_valid_nationality(value, country):
-    """Validate nationality against supported country-specific accepted values."""
+def normalize_nationality(value, country):
+    """
+    Convert nationality variants into canonical form.
+    """
     value = normalize(value)
     country = normalize(country)
 
+    mapping = {
+        "ALBANIA": ["ALBANIA", "ALB", "ALBANIAN"],
+        "LATVIA": ["LATVIA", "LVA", "LATVIJAS", "LATVIAN"],
+        "SLOVAKIA": ["SVK", "SLOVAKIA", "SLOVAK", "SLOVAKIAN"],
+    }
+
+    canonical = {
+        "ALBANIA": "ALBANIAN",
+        "LATVIA": "LATVIAN",
+        "SLOVAKIA": "SLOVAK",
+    }
+
+    for c, variants in mapping.items():
+        if value in variants:
+            return canonical[c]
+
+    return value
+
+
+def is_valid_nationality(value, country):
+    """Validate nationality against supported country-specific accepted values."""
+    value = normalize_nationality(value, country)
+    country = normalize(country)
+
     rules = {
-        "ALBANIA": ["ALBANIAN", "ALB"],
-        "LATVIA": ["LATVIJAS", "LVA"],
-        "SLOVAKIA": ["SVK"],
+        "ALBANIA": ["ALBANIAN"],
+        "LATVIA": ["LATVIAN"],
+        "SLOVAKIA": ["SLOVAK"],
     }
 
     return value in rules.get(country, [])
