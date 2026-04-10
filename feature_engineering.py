@@ -1986,7 +1986,6 @@ class DocumentForgeryDetector:
             show_anomalies = False
 
         prediction_label = self.final_verdict if self.final_verdict else verdict
-        is_forged = verdict == "FORGED"
         vis = self.display_image.copy()
 
         # 1. OCR boxes (Yellow)
@@ -2009,43 +2008,6 @@ class DocumentForgeryDetector:
                     x1, y1, x2, y2 = a['char']['bbox']
                     cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 0, 255), 3)
 
-        label_text = f"GROUND TRUTH: {self.ground_truth_label}"
-        color = (0, 255, 0) if self.ground_truth_label == "GENUINE" else (0, 0, 255)
-        cv2.putText(
-            vis,
-            label_text,
-            (30, 50),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1.2,
-            color,
-            3,
-            cv2.LINE_AA
-        )
-
-        pred_text = f"PREDICTION: {prediction_label}"
-        cv2.putText(
-            vis,
-            pred_text,
-            (30, 100),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1.2,
-            (255, 255, 0),
-            3,
-            cv2.LINE_AA
-        )
-
-        if self.ground_truth_label != prediction_label:
-            cv2.putText(
-                vis,
-                "MISCLASSIFIED",
-                (30, 150),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.2,
-                (0, 0, 255),
-                3,
-                cv2.LINE_AA
-            )
-
         orig_rgb = cv2.cvtColor(self.display_image, cv2.COLOR_BGR2RGB)
         vis_rgb  = cv2.cvtColor(vis, cv2.COLOR_BGR2RGB)
 
@@ -2058,10 +2020,14 @@ class DocumentForgeryDetector:
 
         ax2 = fig.add_subplot(1, 2, 2)
         ax2.imshow(vis_rgb)
+        title_text = (
+            f"Forgery Detection Verdict: {prediction_label} | "
+            f"Ground Truth: {self.ground_truth_label}"
+        )
         ax2.set_title(
-            f"Forgery Detection Verdict: {verdict}",
+            title_text,
             fontsize=14,
-            color="red" if is_forged else "green",
+            color="green",
             weight="bold"
         )
         ax2.axis("off")
