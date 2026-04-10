@@ -872,22 +872,66 @@ class DocumentForgeryDetector:
         # GIVEN NAME (STRONG FIX)
         for i, box in enumerate(boxes):
             if "GIVEN" in box["norm"] or "EMRI" in box["norm"]:
+                label_top = box["bbox"][1]
+                label_bottom = box["bbox"][3]
+
                 best_candidate = None
                 best_score = -999
 
                 for j, candidate in enumerate(boxes):
-                    if j == i:
+                    if i == j:
                         continue
-                    dy = candidate["bbox"][1] - box["bbox"][3]
-                    dx = abs(candidate["bbox"][0] - box["bbox"][0])
 
-                    if 0 <= dy <= 120 and dx <= 200:
-                        if not is_valid_for_field("GIVEN NAME", candidate["text"]):
-                            continue
-                        score = self._score_candidate("GIVEN NAME", candidate, box)
-                        if score > best_score:
-                            best_score = score
-                            best_candidate = candidate
+                    cx1, cy1, cx2, cy2 = candidate["bbox"]
+
+                    dy_top = cy1 - label_bottom
+                    dy_center = ((cy1 + cy2) / 2) - label_bottom
+                    dx = abs(cx1 - box["bbox"][0])
+
+                    # 🚨 STRICT: must be clearly BELOW label (not overlapping)
+                    if dy_top < 10:
+                        continue
+
+                    # 🚨 must not be too far
+                    if dy_top > 150:
+                        continue
+
+                    # 🚨 horizontal alignment
+                    if dx > 200:
+                        continue
+
+                    # 🚨 reject label-like words HARD
+                    text_norm = candidate["norm"]
+
+                    if is_label_like(text_norm):
+                        continue
+
+                    if any(x in text_norm for x in ["MBIEMRI", "EMRI", "NAME", "SURNAME"]):
+                        continue
+
+                    # 🚨 reject if same vertical band (this kills your bug)
+                    if abs(cy1 - label_top) < 20:
+                        continue
+
+                    # 🚨 valid name check
+                    if not re.fullmatch(r"[A-Za-z]{3,}", candidate["text"]):
+                        continue
+
+                    # scoring
+                    score = 0
+
+                    if 10 <= dy_top <= 80:
+                        score += 5
+
+                    if dx < 100:
+                        score += 3
+
+                    if -5 <= dy_center <= 120:
+                        score += 1
+
+                    if score > best_score:
+                        best_score = score
+                        best_candidate = candidate
 
                 if best_candidate:
                     entities["GIVEN NAME"] = best_candidate
