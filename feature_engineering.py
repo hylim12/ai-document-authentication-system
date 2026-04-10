@@ -118,13 +118,13 @@ class DocumentForgeryDetector:
         """
         Determines ground truth label from filename.
         If 'fake' in filename → FORGED
-        Else → GENUINE
+        Else → AUTHENTIC
         """
         filename = os.path.basename(self.image_path).lower()
 
         if "fake" in filename:
             return "FORGED"
-        return "GENUINE"
+        return "AUTHENTIC"
 
 
 
@@ -1985,7 +1985,6 @@ class DocumentForgeryDetector:
             verdict = "AUTHENTIC"
             show_anomalies = False
 
-        prediction_label = self.final_verdict if self.final_verdict else verdict
         vis = self.display_image.copy()
 
         # 1. OCR boxes (Yellow)
@@ -2020,14 +2019,12 @@ class DocumentForgeryDetector:
 
         ax2 = fig.add_subplot(1, 2, 2)
         ax2.imshow(vis_rgb)
-        title_text = (
-            f"Forgery Detection Verdict: {prediction_label} | "
-            f"Ground Truth: {self.ground_truth_label}"
-        )
+        title_text = f"Ground Truth: {self.ground_truth_label}"
+        title_color = (0, 255, 0)
         ax2.set_title(
             title_text,
             fontsize=14,
-            color="green",
+            color=tuple(channel / 255 for channel in title_color),
             weight="bold"
         )
         ax2.axis("off")
