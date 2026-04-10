@@ -171,11 +171,6 @@ def compute_risk_score(entities, country=None):
             risk += 3
             issues.append("Invalid Document Number")
 
-        pob = get("PLACE OF BIRTH") or ""
-        if "ALB" not in pob.upper():
-            risk += 2
-            issues.append("Invalid Place of Birth (ALBANIA)")
-
     elif country == "LATVIA":
         nat = normalize_nationality(get("NATIONALITY"), country)
         if not is_valid_nationality(nat, country):
