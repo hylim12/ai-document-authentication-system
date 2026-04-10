@@ -2020,7 +2020,7 @@ class DocumentForgeryDetector:
         ax2 = fig.add_subplot(1, 2, 2)
         ax2.imshow(vis_rgb)
         title_text = f"Ground Truth: {self.ground_truth_label}"
-        title_color = (0, 255, 0)
+        title_color = (0, 100, 0)
         ax2.set_title(
             title_text,
             fontsize=14,
