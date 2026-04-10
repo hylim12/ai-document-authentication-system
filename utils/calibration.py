@@ -92,8 +92,11 @@ def calibrate_entities(entities, country=None, raw_lines=None):
                     continue
                 if surname_lower in line_text.lower():
                     parts = line_text.split()
-                    if len(parts) >= 2:
-                        _set_entity_text(corrected, "GIVEN NAME", parts[0])
+                    for p in parts:
+                        if p.lower() != surname_lower and p.isalpha() and len(p) > 2:
+                            _set_entity_text(corrected, "GIVEN NAME", p)
+                            break
+                    if corrected.get("GIVEN NAME"):
                         break
 
     # RULE 6: Keep PERSONAL NO distinct from ID CARD NO when comparable

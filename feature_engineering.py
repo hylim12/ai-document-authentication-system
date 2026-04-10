@@ -688,12 +688,46 @@ class DocumentForgeryDetector:
                         if is_label_like(candidate["norm"]):
                             continue
 
-                        if not self._is_valid_for_field(field, candidate["text"]):
-                            continue
+                        # 🚀 Relax validation for GIVEN NAME to improve recall
+                        if field != "GIVEN NAME":
+                            if not self._is_valid_for_field(field, candidate["text"]):
+                                continue
 
                         assign_if_valid(field, candidate)
                         used.add(j)
                         break
+
+        # 🚀 STRONG RULE: GIVEN NAME extraction using vertical proximity
+        for i, box in enumerate(boxes):
+            if "GIVEN" in box["norm"] or "EMRI" in box["norm"]:
+
+                label_y_bottom = box["bbox"][3]
+
+                best_candidate = None
+                best_distance = float("inf")
+
+                for j, candidate in enumerate(boxes):
+                    if j == i:
+                        continue
+
+                    dy = candidate["bbox"][1] - label_y_bottom
+                    dx = abs(candidate["bbox"][0] - box["bbox"][0])
+
+                    # prioritize value BELOW label
+                    if 0 <= dy <= 120 and dx < 200:
+
+                        if is_label_like(candidate["norm"]):
+                            continue
+
+                        if len(candidate["text"]) < 2:
+                            continue
+
+                        if dy < best_distance:
+                            best_candidate = candidate
+                            best_distance = dy
+
+                if best_candidate:
+                    entities["GIVEN NAME"] = best_candidate
 
         # 🚀 FALLBACK RULES
         for box in boxes:
