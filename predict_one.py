@@ -13,7 +13,7 @@ import pandas as pd
 from feature_engineering import DocumentForgeryDetector, ensure_output_folder, extract_country_code
 
 # Image to be predicted (unseen documents)
-NEW_IMAGE_PATH = "datasets/testing_set/alb_id_84_fake_6_111.jpg"
+NEW_IMAGE_PATH = "datasets/testing_set/alb_id_84_fake_6_110.jpg"
 
 # Paths produced by ml_model_training.ipynb
 MODEL_PATH = "trained_models/forged_document_rf_model.pkl"
