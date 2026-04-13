@@ -35,10 +35,16 @@ def load_dataset(path: str) -> pd.DataFrame:
         "OCR_Confidence_Mean": 0.0,
         "Field_Blur_Variance": 0.0,
         "Risk_Score": 0.0,
+        "NER_Field_Count": 0,
+        "Has_POB": 0,
     }
     for col, default in optional_numeric_defaults.items():
         if col not in df.columns:
             df[col] = default
+
+    # Enforce schema consistency: Slovakia IDs should not include PLACE OF BIRTH.
+    if "Country_Code" in df.columns:
+        df.loc[df["Country_Code"] == "SVK", "Has_POB"] = 0
     return df
 
 

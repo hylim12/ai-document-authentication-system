@@ -2159,6 +2159,8 @@ class DocumentForgeryDetector:
         fig.tight_layout()
 
         if save_path:
+            # 🚀 Ensure directory exists before saving
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
             fig.savefig(save_path, dpi=200, bbox_inches="tight")
 
         plt.close(fig)
@@ -2259,10 +2261,16 @@ class DocumentForgeryDetector:
 
 
 def ensure_output_folder():
-    """Creates the output folder if it doesn't exist."""
-    folder = "final_results/PNG_results"
-    os.makedirs(folder, exist_ok=True)
-    return folder
+    folders = [
+        "PNG_results",
+        "final_results/results/OCR_JSON_results",
+        "final_results/results/NER_JSON_results",
+    ]
+
+    for folder in folders:
+        os.makedirs(folder, exist_ok=True)
+
+    return folders[0]
 
 def default_png_output_path(image_path):
     """Build default PNG output path for a processed document."""

@@ -32,7 +32,45 @@ def predict_single_document(image_path):
     detector.process_document()
 
     feature_dict = detector.forgery_features.copy()
-    feature_dict["Country_Code"] = extract_country_code(os.path.basename(image_path))
+    country_map = {
+        "ALB": "ALBANIA",
+        "LVA": "LATVIA",
+        "SVK": "SLOVAKIA",
+    }
+    raw_code = extract_country_code(os.path.basename(image_path))
+    feature_dict["Country_Code"] = raw_code
+    feature_dict["Country_Name"] = country_map.get(raw_code, "UNKNOWN")
+
+    # Inject calibrated NER features
+    if hasattr(detector, "ner_entities"):
+        feature_dict["Risk_Score"] = getattr(detector, "risk_score", 0.0)
+        feature_dict["NER_Field_Count"] = len(detector.ner_entities)
+
+        # Slovakia has no PLACE OF BIRTH expected
+        if raw_code != "SVK":
+            feature_dict["Has_POB"] = int("PLACE OF BIRTH" in detector.ner_entities)
+        else:
+            feature_dict["Has_POB"] = 0
+
+    # AML anomaly-strength features
+    feature_dict["Num_Anomalies"] = len(getattr(detector, "anomalies", []))
+    feature_dict["Num_Background_Anomalies"] = len(getattr(detector, "background_anomalies", []))
+    feature_dict["Num_OCR_Box_Anomalies"] = len(getattr(detector, "ocr_box_anomalies", []))
+
+    # Ensure all AML features exist
+    default_features = {
+        "Font_Size_Variance": 0.0,
+        "OCR_Confidence_Mean": 0.0,
+        "Field_Blur_Variance": 0.0,
+        "Risk_Score": 0.0,
+        "NER_Field_Count": 0,
+        "Has_POB": 0,
+    }
+    for k, v in default_features.items():
+        feature_dict.setdefault(k, v)
+
+    # Optional explainability hook
+    detector.feature_snapshot = feature_dict.copy()
 
     # Backward/forward compatibility: align with model's expected input columns.
     expected_cols = None
@@ -65,10 +103,14 @@ def predict_single_document(image_path):
     detector.ml_verdict = verdict
     detector.ml_confidence = confidence
 
-    ensure_output_folder()
+    # 🚀 Ensure output directory exists (CRITICAL FIX)
+    output_dir = "PNG_results"
+    os.makedirs(output_dir, exist_ok=True)
+
     out_name = f"{os.path.splitext(os.path.basename(image_path))[0]}_ML_PREDICTION.png"
-    output_png = os.path.join("PNG_results", out_name)
+    output_png = os.path.join(output_dir, out_name)
     detector.visualize_results(save_path=output_png)
+    print(f"[INFO] Saved visualization → {output_png}")
 
     return verdict, confidence, pred_proba, detector
 
