@@ -636,6 +636,10 @@ class DocumentForgeryDetector:
             if field in entities:
                 return
 
+            # 🚨 Skip PLACE OF BIRTH for Slovakia
+            if country == "SLOVAKIA" and field == "PLACE OF BIRTH":
+                return
+
             # 🚫 prevent ID ↔ Personal swap
             if field == "PERSONAL NO" and "ID CARD NO" in entities:
                 if box["text"] == entities["ID CARD NO"]["text"]:
@@ -660,6 +664,9 @@ class DocumentForgeryDetector:
         for field in required_fields:
             candidate = self.match_field_by_label(field, boxes)
             if candidate:
+                # 🚨 Skip PLACE OF BIRTH for Slovakia
+                if country == "SLOVAKIA" and field == "PLACE OF BIRTH":
+                    continue
                 entities[field] = candidate
 
         # DIRECT LABEL → VALUE EXTRACTION (SCORING-BASED)
