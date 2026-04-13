@@ -673,6 +673,8 @@ class DocumentForgeryDetector:
         for i, box in enumerate(boxes):
             for pattern, field in label_map.items():
                 if re.search(pattern, box["norm"]):
+                    if country == "SLOVAKIA" and field == "PLACE OF BIRTH":
+                        continue
 
                     for j, candidate in enumerate(boxes):
                         if j == i:
@@ -1021,29 +1023,31 @@ class DocumentForgeryDetector:
                             break
 
         for box in boxes:
-            if "," in box["text"] and not any(char.isdigit() for char in box["text"]):
-                assign_if_valid("PLACE OF BIRTH", box)
+            if country != "SLOVAKIA":
+                if "," in box["text"] and not any(char.isdigit() for char in box["text"]):
+                    assign_if_valid("PLACE OF BIRTH", box)
 
         # 🚀 DERIVE NATIONALITY FROM PLACE OF BIRTH
-        if "NATIONALITY" not in entities and "PLACE OF BIRTH" in entities:
-            pob_text = entities["PLACE OF BIRTH"]["text"].upper()
+        if country != "SLOVAKIA":
+            if "NATIONALITY" not in entities and "PLACE OF BIRTH" in entities:
+                pob_text = entities["PLACE OF BIRTH"]["text"].upper()
 
-            # Look for country codes
-            match = re.search(r'\b(ALB|LVA|SVK)\b', pob_text)
-            if match:
-                country_code = match.group(1)
+                # Look for country codes
+                match = re.search(r'\b(ALB|LVA|SVK)\b', pob_text)
+                if match:
+                    country_code = match.group(1)
 
-                nationality_map = {
-                    "ALB": "ALBANIAN",
-                    "LVA": "LVA",
-                    "SVK": "SVK"
-                }
+                    nationality_map = {
+                        "ALB": "ALBANIAN",
+                        "LVA": "LVA",
+                        "SVK": "SVK"
+                    }
 
-                entities["NATIONALITY"] = {
-                    "text": nationality_map.get(country_code, country_code),
-                    "bbox": entities["PLACE OF BIRTH"]["bbox"],
-                    "confidence": 0.85
-                }
+                    entities["NATIONALITY"] = {
+                        "text": nationality_map.get(country_code, country_code),
+                        "bbox": entities["PLACE OF BIRTH"]["bbox"],
+                        "confidence": 0.85
+                    }
 
         # AUTHORITY (IMPROVED)
         for i, box in enumerate(boxes):
@@ -1448,9 +1452,11 @@ class DocumentForgeryDetector:
             'DOCUMENT NO',
             'PERSONAL NO',
             'NATIONALITY',
-            'PLACE OF BIRTH',
             'AUTHORITY',
         }
+
+        if self.detect_country(self.ocr_full_text) != "SLOVAKIA":
+            core_fields.add("PLACE OF BIRTH")
 
         optional_fields = {
             'HEIGHT',
