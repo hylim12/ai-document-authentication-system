@@ -55,6 +55,9 @@ def calibrate_entities(entities, country=None, raw_lines=None):
     """
     corrected = deepcopy(entities)
 
+    if country == "SLOVAKIA":
+        corrected.pop("PLACE OF BIRTH", None)
+
     # RULE 1: GIVEN NAME should not contain label artifacts
     given_name = _entity_text(corrected.get("GIVEN NAME"))
     if given_name:
@@ -155,6 +158,11 @@ def compute_risk_score(entities, country=None):
         if not get(field):
             risk += 2
             issues.append(f"{field} missing")
+
+    if country != "SLOVAKIA":
+        if not get("PLACE OF BIRTH"):
+            risk += 2
+            issues.append("PLACE OF BIRTH missing")
 
     if country == "ALBANIA":
         nat = normalize_nationality(get("NATIONALITY"), country)
