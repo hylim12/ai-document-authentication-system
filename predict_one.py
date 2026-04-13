@@ -103,10 +103,14 @@ def predict_single_document(image_path):
     detector.ml_verdict = verdict
     detector.ml_confidence = confidence
 
-    ensure_output_folder()
+    # 🚀 Ensure output directory exists (CRITICAL FIX)
+    output_dir = "PNG_results"
+    os.makedirs(output_dir, exist_ok=True)
+
     out_name = f"{os.path.splitext(os.path.basename(image_path))[0]}_ML_PREDICTION.png"
-    output_png = os.path.join("PNG_results", out_name)
+    output_png = os.path.join(output_dir, out_name)
     detector.visualize_results(save_path=output_png)
+    print(f"[INFO] Saved visualization → {output_png}")
 
     return verdict, confidence, pred_proba, detector
 
