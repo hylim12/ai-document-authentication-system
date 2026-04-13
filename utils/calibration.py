@@ -55,6 +55,9 @@ def calibrate_entities(entities, country=None, raw_lines=None):
     """
     corrected = deepcopy(entities)
 
+    if country == "SLOVAKIA":
+        corrected.pop("PLACE OF BIRTH", None)
+
     # RULE 1: GIVEN NAME should not contain label artifacts
     given_name = _entity_text(corrected.get("GIVEN NAME"))
     if given_name:
@@ -84,17 +87,16 @@ def calibrate_entities(entities, country=None, raw_lines=None):
     # RULE 5: Recover GIVEN NAME using SURNAME context
     if not corrected.get("GIVEN NAME") and raw_lines:
         surname = _entity_text(corrected.get("SURNAME"))
-        if surname:
-            surname_lower = str(surname).lower()
-            for line in raw_lines:
-                line_text = str(line).strip()
-                if not line_text:
-                    continue
-                if surname_lower in line_text.lower():
-                    parts = line_text.split()
-                    if len(parts) >= 2:
-                        _set_entity_text(corrected, "GIVEN NAME", parts[0])
+        for line in raw_lines:
+            words = re.findall(r"[A-Za-z]{3,}", str(line))
+
+            if len(words) >= 2:
+                for w in words:
+                    if w.lower() != str(surname).lower():
+                        _set_entity_text(corrected, "GIVEN NAME", w)
                         break
+            if corrected.get("GIVEN NAME"):
+                break
 
     # RULE 6: Keep PERSONAL NO distinct from ID CARD NO when comparable
     personal_no = _entity_text(corrected.get("PERSONAL NO"))
@@ -156,6 +158,11 @@ def compute_risk_score(entities, country=None):
         if not get(field):
             risk += 2
             issues.append(f"{field} missing")
+
+    if country != "SLOVAKIA":
+        if not get("PLACE OF BIRTH"):
+            risk += 2
+            issues.append("PLACE OF BIRTH missing")
 
     if country == "ALBANIA":
         nat = normalize_nationality(get("NATIONALITY"), country)

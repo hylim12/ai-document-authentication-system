@@ -636,6 +636,10 @@ class DocumentForgeryDetector:
             if field in entities:
                 return
 
+            # 🚨 Skip PLACE OF BIRTH for Slovakia
+            if country == "SLOVAKIA" and field == "PLACE OF BIRTH":
+                return
+
             # 🚫 prevent ID ↔ Personal swap
             if field == "PERSONAL NO" and "ID CARD NO" in entities:
                 if box["text"] == entities["ID CARD NO"]["text"]:
@@ -660,12 +664,17 @@ class DocumentForgeryDetector:
         for field in required_fields:
             candidate = self.match_field_by_label(field, boxes)
             if candidate:
+                # 🚨 Skip PLACE OF BIRTH for Slovakia
+                if country == "SLOVAKIA" and field == "PLACE OF BIRTH":
+                    continue
                 entities[field] = candidate
 
         # DIRECT LABEL → VALUE EXTRACTION (SCORING-BASED)
         for i, box in enumerate(boxes):
             for pattern, field in label_map.items():
                 if re.search(pattern, box["norm"]):
+                    if country == "SLOVAKIA" and field == "PLACE OF BIRTH":
+                        continue
 
                     for j, candidate in enumerate(boxes):
                         if j == i:
@@ -688,12 +697,52 @@ class DocumentForgeryDetector:
                         if is_label_like(candidate["norm"]):
                             continue
 
-                        if not self._is_valid_for_field(field, candidate["text"]):
-                            continue
+                        # 🚀 Relax validation for GIVEN NAME to improve recall
+                        if field != "GIVEN NAME":
+                            if not self._is_valid_for_field(field, candidate["text"]):
+                                continue
 
                         assign_if_valid(field, candidate)
                         used.add(j)
                         break
+
+        # 🚀 ADVANCED GIVEN NAME EXTRACTION (LAYOUT-AWARE)
+        for i, box in enumerate(boxes):
+            if "GIVEN" in box["norm"] or "EMRI" in box["norm"]:
+                best_candidate = None
+                best_score = -999
+
+                for j, candidate in enumerate(boxes):
+                    if j == i:
+                        continue
+
+                    if is_label_like(candidate["norm"]):
+                        continue
+
+                    # 🚨 Explicit blacklist for label-like tokens
+                    if any(x in candidate["norm"] for x in ["MBIEMRI", "EMRI", "NAME", "SURNAME"]):
+                        continue
+
+                    # 🚨 Reject short/noisy tokens
+                    if len(candidate["text"]) < 3:
+                        continue
+
+                    # 🚨 HARD CONSTRAINT: candidate MUST be below label
+                    dy = candidate["bbox"][1] - box["bbox"][3]
+                    if dy < 0:
+                        continue
+
+                    score = self._spatial_score(box["bbox"], candidate["bbox"])
+                    if self._looks_like_name(candidate["text"]):
+                        score += 5  # stronger boost
+
+                    # 🚀 NO STRICT VALIDATION HERE (important for recall)
+                    if score > best_score:
+                        best_score = score
+                        best_candidate = candidate
+
+                if best_candidate and best_score >= 5:
+                    entities["GIVEN NAME"] = best_candidate
 
         # 🚀 FALLBACK RULES
         for box in boxes:
@@ -832,22 +881,66 @@ class DocumentForgeryDetector:
         # GIVEN NAME (STRONG FIX)
         for i, box in enumerate(boxes):
             if "GIVEN" in box["norm"] or "EMRI" in box["norm"]:
+                label_top = box["bbox"][1]
+                label_bottom = box["bbox"][3]
+
                 best_candidate = None
                 best_score = -999
 
                 for j, candidate in enumerate(boxes):
-                    if j == i:
+                    if i == j:
                         continue
-                    dy = candidate["bbox"][1] - box["bbox"][3]
-                    dx = abs(candidate["bbox"][0] - box["bbox"][0])
 
-                    if 0 <= dy <= 120 and dx <= 200:
-                        if not is_valid_for_field("GIVEN NAME", candidate["text"]):
-                            continue
-                        score = self._score_candidate("GIVEN NAME", candidate, box)
-                        if score > best_score:
-                            best_score = score
-                            best_candidate = candidate
+                    cx1, cy1, cx2, cy2 = candidate["bbox"]
+
+                    dy_top = cy1 - label_bottom
+                    dy_center = ((cy1 + cy2) / 2) - label_bottom
+                    dx = abs(cx1 - box["bbox"][0])
+
+                    # 🚨 STRICT: must be clearly BELOW label (not overlapping)
+                    if dy_top < 10:
+                        continue
+
+                    # 🚨 must not be too far
+                    if dy_top > 150:
+                        continue
+
+                    # 🚨 horizontal alignment
+                    if dx > 200:
+                        continue
+
+                    # 🚨 reject label-like words HARD
+                    text_norm = candidate["norm"]
+
+                    if is_label_like(text_norm):
+                        continue
+
+                    if any(x in text_norm for x in ["MBIEMRI", "EMRI", "NAME", "SURNAME"]):
+                        continue
+
+                    # 🚨 reject if same vertical band (this kills your bug)
+                    if abs(cy1 - label_top) < 20:
+                        continue
+
+                    # 🚨 valid name check
+                    if not re.fullmatch(r"[A-Za-z]{3,}", candidate["text"]):
+                        continue
+
+                    # scoring
+                    score = 0
+
+                    if 10 <= dy_top <= 80:
+                        score += 5
+
+                    if dx < 100:
+                        score += 3
+
+                    if -5 <= dy_center <= 120:
+                        score += 1
+
+                    if score > best_score:
+                        best_score = score
+                        best_candidate = candidate
 
                 if best_candidate:
                     entities["GIVEN NAME"] = best_candidate
@@ -930,29 +1023,31 @@ class DocumentForgeryDetector:
                             break
 
         for box in boxes:
-            if "," in box["text"] and not any(char.isdigit() for char in box["text"]):
-                assign_if_valid("PLACE OF BIRTH", box)
+            if country != "SLOVAKIA":
+                if "," in box["text"] and not any(char.isdigit() for char in box["text"]):
+                    assign_if_valid("PLACE OF BIRTH", box)
 
         # 🚀 DERIVE NATIONALITY FROM PLACE OF BIRTH
-        if "NATIONALITY" not in entities and "PLACE OF BIRTH" in entities:
-            pob_text = entities["PLACE OF BIRTH"]["text"].upper()
+        if country != "SLOVAKIA":
+            if "NATIONALITY" not in entities and "PLACE OF BIRTH" in entities:
+                pob_text = entities["PLACE OF BIRTH"]["text"].upper()
 
-            # Look for country codes
-            match = re.search(r'\b(ALB|LVA|SVK)\b', pob_text)
-            if match:
-                country_code = match.group(1)
+                # Look for country codes
+                match = re.search(r'\b(ALB|LVA|SVK)\b', pob_text)
+                if match:
+                    country_code = match.group(1)
 
-                nationality_map = {
-                    "ALB": "ALBANIAN",
-                    "LVA": "LVA",
-                    "SVK": "SVK"
-                }
+                    nationality_map = {
+                        "ALB": "ALBANIAN",
+                        "LVA": "LVA",
+                        "SVK": "SVK"
+                    }
 
-                entities["NATIONALITY"] = {
-                    "text": nationality_map.get(country_code, country_code),
-                    "bbox": entities["PLACE OF BIRTH"]["bbox"],
-                    "confidence": 0.85
-                }
+                    entities["NATIONALITY"] = {
+                        "text": nationality_map.get(country_code, country_code),
+                        "bbox": entities["PLACE OF BIRTH"]["bbox"],
+                        "confidence": 0.85
+                    }
 
         # AUTHORITY (IMPROVED)
         for i, box in enumerate(boxes):
@@ -1357,9 +1452,11 @@ class DocumentForgeryDetector:
             'DOCUMENT NO',
             'PERSONAL NO',
             'NATIONALITY',
-            'PLACE OF BIRTH',
             'AUTHORITY',
         }
+
+        if self.detect_country(self.ocr_full_text) != "SLOVAKIA":
+            core_fields.add("PLACE OF BIRTH")
 
         optional_fields = {
             'HEIGHT',
@@ -1474,6 +1571,36 @@ class DocumentForgeryDetector:
 
     def _is_alphanumeric_id(self, text):
         return bool(re.fullmatch(r'[A-Z0-9]{6,}', str(text or "")))
+
+    def _looks_like_name(self, text):
+        return bool(re.fullmatch(r"[A-Za-z]{3,}", str(text or "")))
+
+    def _spatial_score(self, label_box, candidate_box):
+        """
+        Compute spatial relevance score between label and candidate.
+        Higher score = better match.
+        """
+        lx1, ly1, lx2, ly2 = label_box
+        cx1, cy1, cx2, cy2 = candidate_box
+
+        dy = cy1 - ly2
+        dx = abs(cx1 - lx1)
+
+        score = 0
+
+        # Strong vertical alignment (most important)
+        if 0 <= dy <= 120:
+            score += 5
+
+        # Horizontal alignment
+        if dx < 200:
+            score += 3
+
+        # Penalize if above label
+        if dy < 0:
+            score -= 5
+
+        return score
 
     def _score_candidate(self, field, candidate, anchor=None):
         score = 0
