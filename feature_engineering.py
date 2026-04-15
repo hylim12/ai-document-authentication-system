@@ -2262,7 +2262,7 @@ class DocumentForgeryDetector:
 
 def ensure_output_folder():
     folders = [
-        "PNG_results",
+        "final_results/PNG_results",
         "final_results/results/OCR_JSON_results",
         "final_results/results/NER_JSON_results",
     ]
