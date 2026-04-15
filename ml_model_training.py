@@ -21,6 +21,27 @@ METRICS_PATH = MODEL_DIR / "training_metrics.json"
 TARGET_ACCURACY = 0.80
 SEED_CANDIDATES = [7, 11, 13, 17, 19, 23, 29, 31, 37, 41]
 
+LEAKAGE_PREFIXES = ("Image_Name_",)
+
+
+def _drop_leakage_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop columns that leak identity or pre-encoded country dimensions."""
+    leakage_columns = []
+    for col in df.columns:
+        if col in {"Image_Name", "Document_ID"}:
+            leakage_columns.append(col)
+            continue
+        if col.startswith(("Country_Code_", "Country_Name_")):
+            leakage_columns.append(col)
+            continue
+        if col.startswith(LEAKAGE_PREFIXES):
+            leakage_columns.append(col)
+
+    if leakage_columns:
+        print(f"[WARN] Dropping leakage/pre-encoded columns: {sorted(leakage_columns)}")
+        df = df.drop(columns=sorted(set(leakage_columns)))
+    return df
+
 
 def load_dataset(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
@@ -45,14 +66,18 @@ def load_dataset(path: str) -> pd.DataFrame:
     # Enforce schema consistency: Slovakia IDs should not include PLACE OF BIRTH.
     if "Country_Code" in df.columns:
         df.loc[df["Country_Code"] == "SVK", "Has_POB"] = 0
-    return df
+
+    # Prevent data leakage and training/inference schema drift.
+    return _drop_leakage_columns(df)
 
 
 def build_training_columns(df: pd.DataFrame):
-    ignored = {"Document_ID", "Image_Name", "Label"}
+    ignored = {"Label"}
     feature_columns = [c for c in df.columns if c not in ignored]
-    categorical = [c for c in feature_columns if c == "Country_Code"]
-    numeric = [c for c in feature_columns if c != "Country_Code"]
+
+    categorical_candidates = ["Country_Code", "Country_Name"]
+    categorical = [c for c in categorical_candidates if c in feature_columns]
+    numeric = [c for c in feature_columns if c not in categorical]
     return feature_columns, numeric, categorical
 
 
