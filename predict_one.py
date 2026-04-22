@@ -13,7 +13,7 @@ import pandas as pd
 from feature_engineering import DocumentForgeryDetector, ensure_output_folder, extract_country_code
 
 # Image to be predicted (unseen documents)
-NEW_IMAGE_PATH = "datasets/testing_set/alb_id_84_fake_6_110.jpg"
+NEW_IMAGE_PATH = "datasets/testing_set/svk_id_93_fake_8_63.jpg"
 
 # Paths produced by ml_model_training.ipynb
 MODEL_PATH = "trained_models/forged_document_rf_model.pkl"
@@ -85,8 +85,8 @@ def predict_single_document(image_path):
     detector.ml_verdict = verdict
     detector.ml_confidence = confidence
 
-    # 🚀 Ensure output directory exists (CRITICAL FIX)
-    output_dir = "PNG_results"
+    # Ensure output directory exists (CRITICAL FIX)
+    output_dir = "final_results/PNG_results"
     os.makedirs(output_dir, exist_ok=True)
 
     out_name = f"{os.path.splitext(os.path.basename(image_path))[0]}_ML_PREDICTION.png"
@@ -114,5 +114,5 @@ if __name__ == "__main__":
     print(f"  Genuine (0): {probabilities[0]:.4f}")
     print(f"  Forged  (1): {probabilities[1]:.4f}")
 
-    print("\n[INFO] Visualization saved to PNG_results/")
+    print("\n[INFO] Visualization saved to final_results/PNG_results/")
     print("========================================================")
