@@ -56,6 +56,30 @@ def process_dataset(folder_path, dataset_name):
 
             features = detector.forgery_features.copy()
 
+            # 🚀 AML + CV METRICS
+
+            # Ground truth
+            features["Detection_Label"] = extract_label_from_filename(file)
+
+            # OCR Quality (Text Extraction Reliability)
+            features["OCR_Quality"] = features.get("OCR_Confidence_Mean", 0)
+
+            # NER Completeness (Field Extraction Completeness Rate)
+            features["Field_Completeness"] = features.get("NER_Recall", 0)
+
+            # NER Precision + F1 (if available)
+            if hasattr(detector, "ner_metrics"):
+                features["Precision"] = detector.ner_metrics.get("precision", 0)
+                features["F1_Score"] = detector.ner_metrics.get("f1_score", 0)
+            else:
+                features["Precision"] = 0
+                features["F1_Score"] = 0
+
+            # Risk Consistency Score (NEW AML-CV METRIC)
+            num_anomalies = features.get("Num_Anomalies", 0)
+            risk_score = features.get("Risk_Score", 0)
+            features["Risk_Consistency"] = risk_score / (num_anomalies + 1)
+
             # Add metadata
             features["Image_Name"] = file
             features["Country_Code"] = extract_country_code(file)

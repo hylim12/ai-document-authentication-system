@@ -1481,6 +1481,19 @@ class DocumentForgeryDetector:
             "core_expected_count": len(core_fields),
             "ner_recall": len(detected_core) / len(core_fields),
         }
+
+        # 🚀 ADD PRECISION + F1 FOR NER
+        detected_total = len(normalized_detected)
+        expected_total = len(core_fields)
+
+        precision = detected_total / (detected_total + len(missing_core) + 1e-6)
+        recall = len(detected_core) / (expected_total + 1e-6)
+        f1 = 2 * (precision * recall) / (precision + recall + 1e-6)
+
+        self.ner_metrics.update({
+            "precision": precision,
+            "f1_score": f1,
+        })
         self.missing_ner_fields = sorted(missing_core)
 
     def detect_country(self, ocr_text):
