@@ -8,7 +8,15 @@ import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import accuracy_score, classification_report
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
@@ -134,6 +142,15 @@ def train_best_seed(df: pd.DataFrame):
         model.fit(X_train, y_train)
         preds = model.predict(X_test)
         acc = accuracy_score(y_test, preds)
+        cm = confusion_matrix(y_test, preds)
+        tn, fp, fn, tp = cm.ravel()
+
+        precision = precision_score(y_test, preds, zero_division=0)
+        recall = recall_score(y_test, preds, zero_division=0)  # Detection Rate
+        f1 = f1_score(y_test, preds, zero_division=0)
+        specificity = tn / (tn + fp + 1e-6)
+        fpr = fp / (fp + tn + 1e-6)
+        roc_auc = roc_auc_score(y_test, model.predict_proba(X_test)[:, 1])
 
         if best is None or acc > best["accuracy"]:
             best = {
@@ -141,6 +158,18 @@ def train_best_seed(df: pd.DataFrame):
                 "accuracy": acc,
                 "model": model,
                 "report": classification_report(y_test, preds, output_dict=True, zero_division=0),
+                "advanced_metrics": {
+                    "precision": float(precision),
+                    "recall_detection": float(recall),
+                    "f1_score": float(f1),
+                    "specificity": float(specificity),
+                    "false_positive_rate": float(fpr),
+                    "roc_auc": float(roc_auc),
+                    "tn": int(tn),
+                    "fp": int(fp),
+                    "fn": int(fn),
+                    "tp": int(tp),
+                },
                 "train_size": int(len(X_train)),
                 "test_size": int(len(X_test)),
                 "feature_columns": feature_columns,
@@ -170,12 +199,20 @@ def main():
         "test_size": best["test_size"],
         "feature_columns": best["feature_columns"],
         "classification_report": best["report"],
+        "advanced_metrics": best["advanced_metrics"],
     }
 
     with open(METRICS_PATH, "w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2)
 
     print(f"[INFO] Best hold-out accuracy: {best['accuracy']*100:.2f}% (seed={best['seed']})")
+    print("\n===== ADVANCED AML METRICS =====")
+    print(f"Precision            : {best['advanced_metrics']['precision']:.4f}")
+    print(f"Recall (Detection)   : {best['advanced_metrics']['recall_detection']:.4f}")
+    print(f"F1-score             : {best['advanced_metrics']['f1_score']:.4f}")
+    print(f"Specificity          : {best['advanced_metrics']['specificity']:.4f}")
+    print(f"False Positive Rate  : {best['advanced_metrics']['false_positive_rate']:.4f}")
+    print(f"ROC-AUC              : {best['advanced_metrics']['roc_auc']:.4f}")
     print(f"[INFO] Model saved to {MODEL_PATH}")
     print(f"[INFO] Metrics saved to {METRICS_PATH}")
 
