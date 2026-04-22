@@ -90,9 +90,14 @@ def build_training_columns(df: pd.DataFrame):
 
 
 def train_best_seed(df: pd.DataFrame):
-    feature_columns, numeric_features, categorical_features = build_training_columns(df)
-    X = df[feature_columns].copy()
+    X = df.drop(columns=["Label", "Image_Name"], errors="ignore").copy()
+    leakage_cols = ["Detection_Label"]
+    X = X.drop(columns=[c for c in leakage_cols if c in X.columns], errors="ignore")
     y = df["Label"].astype(int)
+
+    feature_columns = list(X.columns)
+    categorical_features = [c for c in ["Country_Code", "Country_Name"] if c in X.columns]
+    numeric_features = [c for c in X.columns if c not in categorical_features]
 
     preprocessor = ColumnTransformer(
         transformers=[

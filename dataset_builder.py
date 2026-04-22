@@ -56,16 +56,29 @@ def process_dataset(folder_path, dataset_name):
 
             features = detector.forgery_features.copy()
 
-            # 🚀 AML + CV METRICS
+            # 🚀 ALIGN FEATURES WITH predict_one.py
 
-            # Ground truth
-            features["Detection_Label"] = extract_label_from_filename(file)
+            # NER features
+            features["NER_Field_Count"] = len(getattr(detector, "ner_entities", {}))
+
+            raw_code = extract_country_code(file)
+            if raw_code != "SVK":
+                features["Has_POB"] = int("PLACE OF BIRTH" in getattr(detector, "ner_entities", {}))
+            else:
+                features["Has_POB"] = 0
+
+            # Anomaly features
+            features["Num_Anomalies"] = len(getattr(detector, "anomalies", []))
+            features["Num_Background_Anomalies"] = len(getattr(detector, "background_anomalies", []))
+            features["Num_OCR_Box_Anomalies"] = len(getattr(detector, "ocr_box_anomalies", []))
+
+            # 🚀 AML + CV METRICS
 
             # OCR Quality (Text Extraction Reliability)
             features["OCR_Quality"] = features.get("OCR_Confidence_Mean", 0)
 
             # NER Completeness (Field Extraction Completeness Rate)
-            features["Field_Completeness"] = features.get("NER_Recall", 0)
+            features["Field_Completeness"] = features.get("NER_Completeness_Ratio", 0)
 
             # NER Precision + F1 (if available)
             if hasattr(detector, "ner_metrics"):
@@ -82,7 +95,7 @@ def process_dataset(folder_path, dataset_name):
 
             # Add metadata
             features["Image_Name"] = file
-            features["Country_Code"] = extract_country_code(file)
+            features["Country_Code"] = raw_code
             features["Label"] = extract_label_from_filename(file)
 
             dataset.append(features)
