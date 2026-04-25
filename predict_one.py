@@ -10,7 +10,7 @@ Functionality: Run single-image inference using the country-aware RandomForest p
 import os
 import pickle
 import pandas as pd
-from feature_engineering import DocumentForgeryDetector, ensure_output_folder, extract_country_code
+from feature_engineering import DocumentForgeryDetector, ensure_output_folder
 
 # Image to be predicted (unseen documents)
 NEW_IMAGE_PATH = "datasets/testing_set/alb_id_84_fake_6_110.jpg"
@@ -37,9 +37,11 @@ def predict_single_document(image_path):
         "LVA": "LATVIA",
         "SVK": "SLOVAKIA",
     }
-    raw_code = extract_country_code(os.path.basename(image_path))
+    country_name = detector.detect_country(getattr(detector, "ocr_full_text", ""))
+    country_to_code = {"ALBANIA": "ALB", "LATVIA": "LVA", "SLOVAKIA": "SVK"}
+    raw_code = country_to_code.get(country_name, "UNK")
     feature_dict["Country_Code"] = raw_code
-    feature_dict["Country_Name"] = country_map.get(raw_code, "UNKNOWN")
+    feature_dict["Country_Name"] = country_name if country_name != "UNKNOWN" else country_map.get(raw_code, "UNKNOWN")
 
     # Inject calibrated NER features
     if hasattr(detector, "ner_entities"):
@@ -47,7 +49,7 @@ def predict_single_document(image_path):
         feature_dict["NER_Field_Count"] = len(detector.ner_entities)
 
         # Slovakia has no PLACE OF BIRTH expected
-        if raw_code != "SVK":
+        if country_name != "SLOVAKIA":
             feature_dict["Has_POB"] = int("PLACE OF BIRTH" in detector.ner_entities)
         else:
             feature_dict["Has_POB"] = 0
@@ -56,6 +58,8 @@ def predict_single_document(image_path):
     feature_dict["Num_Anomalies"] = len(getattr(detector, "anomalies", []))
     feature_dict["Num_Background_Anomalies"] = len(getattr(detector, "background_anomalies", []))
     feature_dict["Num_OCR_Box_Anomalies"] = len(getattr(detector, "ocr_box_anomalies", []))
+    feature_dict["OCR_Quality"] = feature_dict.get("OCR_Confidence_Mean", 0)
+    feature_dict["Field_Completeness"] = feature_dict.get("NER_Completeness_Ratio", 0)
 
     # Ensure all AML features exist
     default_features = {
@@ -69,12 +73,17 @@ def predict_single_document(image_path):
     for k, v in default_features.items():
         feature_dict.setdefault(k, v)
 
+    expected_features = model.named_steps["preprocessor"].feature_names_in_
+    for col in expected_features:
+        if col not in feature_dict:
+            feature_dict[col] = 0
+
     # Optional explainability hook
     detector.feature_snapshot = feature_dict.copy()
 
     # Pass raw features directly into the saved sklearn pipeline.
     # The pipeline handles one-hot encoding + feature alignment internally.
-    X_input = pd.DataFrame([feature_dict])
+    X_input = pd.DataFrame([feature_dict])[list(expected_features)]
 
     pred_label = int(model.predict(X_input)[0])
     pred_proba = model.predict_proba(X_input)[0]
