@@ -61,8 +61,6 @@ class DocumentForgeryDetector:
         self.image_path = image_path
         self.ocr_engine = ocr_engine
         self.log = []
-        self.ground_truth_label = self.get_ground_truth_label()
-        self.log.append(f"- Ground Truth Label: {self.ground_truth_label}")
 
         if not os.path.exists(image_path):
             raise FileNotFoundError(f"Image file not found: {image_path}")
@@ -113,18 +111,6 @@ class DocumentForgeryDetector:
         self.risk_score = 0.0
         self.risk_issues = []
         self.llm_ner_disabled_reason = None
-
-    def get_ground_truth_label(self):
-        """
-        Determines ground truth label from filename.
-        If 'fake' in filename → FORGED
-        Else → AUTHENTIC
-        """
-        filename = os.path.basename(self.image_path).lower()
-
-        if "fake" in filename:
-            return "FORGED"
-        return "AUTHENTIC"
 
 
 
@@ -2107,23 +2093,14 @@ class DocumentForgeryDetector:
             self.log.append(f"[FATAL PIPELINE ERROR] {e}")
             raise
     def visualize_results(self, save_path=None):
-        """
-        Visualization logic is synchronized with:
-        - ML verdict during inference
-        - Ground truth during training dataset generation
-        """
+        """Render OCR/NER overlays and anomaly regions without ground-truth coupling."""
 
         # Case 1: ML-based inference
         if hasattr(self, "ml_verdict"):
             verdict = self.ml_verdict
             show_anomalies = verdict == "FORGED"
-        # Case 2: Training dataset visualization
-        elif hasattr(self, "is_training_doc"):
-            verdict = "FORGED" if self.is_forged_gt else "AUTHENTIC"
-            show_anomalies = self.is_forged_gt
         else:
-            verdict = "AUTHENTIC"
-            show_anomalies = False
+            show_anomalies = True
 
         vis = self.display_image.copy()
 
@@ -2140,7 +2117,7 @@ class DocumentForgeryDetector:
             x1, y1, x2, y2 = bbox
             cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-        # 3. High-severity anomalies (Red) — ONLY WHEN FORGED
+        # 3. High-severity anomalies (Red)
         if show_anomalies:
             for a in self.anomalies:
                 if a.get("severity") == "high" and "char" in a:
@@ -2159,7 +2136,7 @@ class DocumentForgeryDetector:
 
         ax2 = fig.add_subplot(1, 2, 2)
         ax2.imshow(vis_rgb)
-        title_text = f"Ground Truth: {self.ground_truth_label}"
+        title_text = "Detected OCR/NER and anomaly regions"
         title_color = (0, 100, 0)
         ax2.set_title(
             title_text,
