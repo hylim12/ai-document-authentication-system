@@ -94,8 +94,8 @@ def predict_single_document(image_path):
     detector.ml_verdict = verdict
     detector.ml_confidence = confidence
 
-    # 🚀 Ensure output directory exists (CRITICAL FIX)
-    output_dir = "PNG_results"
+    # Ensure output directory exists (CRITICAL FIX)
+    output_dir = "ML_Verdict_PNGs"
     os.makedirs(output_dir, exist_ok=True)
 
     out_name = f"{os.path.splitext(os.path.basename(image_path))[0]}_ML_PREDICTION.png"
