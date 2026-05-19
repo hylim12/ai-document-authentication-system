@@ -56,17 +56,15 @@ def process_dataset(folder_path, dataset_name):
 
             features = detector.forgery_features.copy()
 
-            # 🚀 ALIGN FEATURES WITH predict_one.py
-
-            # NER features
-            features["NER_Field_Count"] = len(getattr(detector, "ner_entities", {}))
+            # Field features
+            features["Field_Count"] = len(getattr(detector, "field_entities", {}))
 
             country_name = detector.detect_country(getattr(detector, "ocr_full_text", ""))
             country_to_code = {"ALBANIA": "ALB", "LATVIA": "LVA", "SLOVAKIA": "SVK"}
             raw_code = country_to_code.get(country_name, "UNK")
 
             if country_name != "SLOVAKIA":
-                features["Has_POB"] = int("PLACE OF BIRTH" in getattr(detector, "ner_entities", {}))
+                features["Has_POB"] = int("PLACE OF BIRTH" in getattr(detector, "field_entities", {}))
             else:
                 features["Has_POB"] = 0
 
@@ -80,8 +78,8 @@ def process_dataset(folder_path, dataset_name):
             # OCR Quality (Text Extraction Reliability)
             features["OCR_Quality"] = features.get("OCR_Confidence_Mean", 0)
 
-            # NER Completeness (Field Extraction Completeness Rate)
-            features["Field_Completeness"] = features.get("NER_Completeness_Ratio", 0)
+            # Field Completeness (Field Extraction Completeness Rate)
+            features["Field_Completeness"] = features.get("Field_Completeness_Ratio", 0)
 
             # Add metadata
             features["Image_Name"] = file

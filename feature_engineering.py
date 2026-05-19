@@ -103,14 +103,14 @@ class DocumentForgeryDetector:
         self.ocr_results = None
         self.ocr_full_text = ""
         self.ocr_boxes = []
-        self.ner_entities = {}
+        self.field_entities = {}
         self.suspicious_regions = []
         self.final_verdict = "VERDICT NOT RUN"
         self.forgery_features = {}
         self.forgery_issues = []
         self.risk_score = 0.0
         self.risk_issues = []
-        self.llm_ner_disabled_reason = None
+        self.llm_field_disabled_reason = None
 
 
 
@@ -311,7 +311,7 @@ class DocumentForgeryDetector:
 
     def detect_anomalies(self, sensitivity=2.0):
         """
-        FORENSIC CHECK: Compares characters against statistical baselines and (if available) NER-standard constraints.
+        FORENSIC CHECK: Compares characters against statistical baselines and (if available) field-standard constraints.
         """
         if not self.baseline_stats:
             self.calculate_baseline_statistics()
@@ -562,9 +562,9 @@ class DocumentForgeryDetector:
 
         self.ocr_boxes = boxes
         if not boxes:
-            self.ner_entities = {}
-            self.ner_metrics = {}
-            self.missing_ner_fields = []
+            self.field_entities = {}
+            self.field_metrics = {}
+            self.missing_field_fields = []
             return
 
         filtered_boxes = []
@@ -576,9 +576,9 @@ class DocumentForgeryDetector:
         boxes = filtered_boxes
         self.ocr_boxes = boxes
         if not boxes:
-            self.ner_entities = {}
-            self.ner_metrics = {}
-            self.missing_ner_fields = []
+            self.field_entities = {}
+            self.field_metrics = {}
+            self.missing_field_fields = []
             return
 
         def y_mid(b): return (b[1] + b[3]) // 2
@@ -1292,7 +1292,7 @@ class DocumentForgeryDetector:
             entities = {k: v for k, v in entities.items() if k in allowed}
 
         # Finalize structured Named Entity Recognition (NER) output
-        self.ner_entities = {
+        self.field_entities = {
             k: {
                 "text": v["text"],
                 "bbox": v["bbox"],
@@ -1304,32 +1304,32 @@ class DocumentForgeryDetector:
         ocr_text_lines = [box["text"] for box in boxes if box.get("text")]
         country = self.detect_country(self.ocr_full_text)
 
-        self.ner_entities = calibrate_entities(
-            self.ner_entities,
+        self.field_entities = calibrate_entities(
+            self.field_entities,
             country=country,
             raw_lines=ocr_text_lines
         )
 
-        self.ner_entities = derive_nationality(self.ner_entities)
-        if "NATIONALITY" not in self.ner_entities or not self.ner_entities["NATIONALITY"].get("text", "").strip() or self.ner_entities["NATIONALITY"].get("text", "").strip().upper() == "UNKNOWN":
+        self.field_entities = derive_nationality(self.field_entities)
+        if "NATIONALITY" not in self.field_entities or not self.field_entities["NATIONALITY"].get("text", "").strip() or self.field_entities["NATIONALITY"].get("text", "").strip().upper() == "UNKNOWN":
             fallback_nationality = country if country and country != "UNKNOWN" else "UNSPECIFIED"
-            self.ner_entities["NATIONALITY"] = {
+            self.field_entities["NATIONALITY"] = {
                 "text": fallback_nationality,
                 "bbox": (0, 0, 0, 0),
                 "confidence": 0.99
             }
 
         self.risk_score, self.risk_issues = compute_risk_score(
-            self.ner_entities,
+            self.field_entities,
             country=country
         )
-        self.ner_source = "REGEX"
+        self.field_source = "REGEX"
 
         # Calculate Recall Metrics: Evaluate extraction completeness for forensic reporting.
-        self._update_ner_metrics()
+        self._update_field_metrics()
 
         if print_summary:
-            self.print_ner_fields_summary()
+            self.print_field_fields_summary()
 
     def parse_mrz_dates(self, mrz_lines):
         try:
@@ -1426,8 +1426,8 @@ class DocumentForgeryDetector:
         except Exception:
             return date_str
 
-    def _update_ner_metrics(self):
-        """Recompute NER completeness metrics from current ner_entities."""
+    def _update_field_metrics(self):
+        """Recompute field completeness metrics from current field_entities."""
         core_fields = {
             'SURNAME',
             'GIVEN NAME',
@@ -1450,7 +1450,7 @@ class DocumentForgeryDetector:
             'MRZ LINE 2',
         }
 
-        detected = set(self.ner_entities.keys())
+        detected = set(self.field_entities.keys())
         normalized_detected = set(detected)
         if {'ID CARD NO', 'PASSPORT NO'} & detected:
             normalized_detected.add('DOCUMENT NO')
@@ -1459,16 +1459,16 @@ class DocumentForgeryDetector:
         missing_core = core_fields - detected_core
         detected_optional = sorted(optional_fields & normalized_detected)
 
-        self.ner_metrics = {
+        self.field_metrics = {
             "detected_fields": sorted(detected),
             "detected_optional_fields": detected_optional,
             "missing_core_fields": sorted(missing_core),
             "detected_core_count": len(detected_core),
             "core_expected_count": len(core_fields),
-            "ner_recall": len(detected_core) / len(core_fields),
+            "field_recall": len(detected_core) / len(core_fields),
         }
 
-        # 🚀 ADD PRECISION + F1 FOR NER
+        # 🚀 ADD PRECISION + F1 FOR FIELD EXTRACTION
         detected_total = len(normalized_detected)
         expected_total = len(core_fields)
 
@@ -1476,11 +1476,11 @@ class DocumentForgeryDetector:
         recall = len(detected_core) / (expected_total + 1e-6)
         f1 = 2 * (precision * recall) / (precision + recall + 1e-6)
 
-        self.ner_metrics.update({
+        self.field_metrics.update({
             "precision": precision,
             "f1_score": f1,
         })
-        self.missing_ner_fields = sorted(missing_core)
+        self.missing_field_fields = sorted(missing_core)
 
     def detect_country(self, ocr_text):
         """Infer document country hints from OCR text."""
@@ -1755,54 +1755,54 @@ class DocumentForgeryDetector:
         json_name = os.path.splitext(image_name)[0] + ".json"
         return os.path.join(json_dir, json_name)
 
-    def _ner_json_output_path(self, image_path):
-        """Build NER JSON path for LLM/regex extracted entities."""
-        json_dir = os.path.join("final_results\\results", "NER_JSON_results")
+    def _field_json_output_path(self, image_path):
+        """Build field JSON path for LLM/regex extracted entities."""
+        json_dir = os.path.join("final_results\\results", "FIELD_JSON_results")
         image_name = os.path.basename(image_path)
         json_name = os.path.splitext(image_name)[0] + ".json"
         return os.path.join(json_dir, json_name)
 
-    def save_ner_json(self, image_path):
-        """Save extracted NER entities to dedicated JSON output folder."""
-        ner_json_path = self._ner_json_output_path(image_path)
-        os.makedirs(os.path.dirname(ner_json_path), exist_ok=True)
+    def save_field_json(self, image_path):
+        """Save extracted field entities to dedicated JSON output folder."""
+        field_json_path = self._field_json_output_path(image_path)
+        os.makedirs(os.path.dirname(field_json_path), exist_ok=True)
 
         data = {
             "image_name": os.path.basename(image_path),
             "image_size": [self.width, self.height],
-            "ner_source": "RULE_BASED_REGEX",
-            "ner_entities": [
+            "field_source": "RULE_BASED_REGEX",
+            "field_entities": [
                 {
                     "field": field,
                     "text": payload.get("text", ""),
                     "bbox": list(payload.get("bbox", [])) if payload.get("bbox") else None,
                     "confidence": float(payload.get("confidence", 0.0)),
                 }
-                for field, payload in sorted(self.ner_entities.items())
+                for field, payload in sorted(self.field_entities.items())
             ],
-            "ner_metrics": getattr(self, "ner_metrics", {}),
+            "field_metrics": getattr(self, "field_metrics", {}),
         }
 
-        with open(ner_json_path, "w", encoding="utf-8") as f:
+        with open(field_json_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4, ensure_ascii=False)
 
-        print(f"[INFO] NER JSON saved → {ner_json_path}")
-        self.log.append(f"- NER JSON saved: {ner_json_path}")
-        return ner_json_path
+        print(f"[INFO] FIELD JSON saved → {field_json_path}")
+        self.log.append(f"- FIELD JSON saved: {field_json_path}")
+        return field_json_path
 
-    def print_ner_fields_summary(self):
-        """Print current NER entity summary to terminal."""
-        print("\n[NER FIELDS]")
-        for k in sorted(self.ner_entities):
-            print(f"  {k:18s}: {self.ner_entities[k]['text']}")
-        print("\n[CALIBRATED NER FIELDS]")
-        for k in sorted(self.ner_entities):
-            print(f"  {k:18s}: {self.ner_entities[k]['text']}")
+    def print_field_fields_summary(self):
+        """Print current field entity summary to terminal."""
+        print("\n[FIELD FIELDS]")
+        for k in sorted(self.field_entities):
+            print(f"  {k:18s}: {self.field_entities[k]['text']}")
+        print("\n[CALIBRATED FIELD FIELDS]")
+        for k in sorted(self.field_entities):
+            print(f"  {k:18s}: {self.field_entities[k]['text']}")
         print(f"\n[⚠️ RISK SCORE]: {int(self.risk_score)}")
         print(f"[⚠️ ISSUES]: {self.risk_issues}")
-        if self.missing_ner_fields:
-            print("  Missing fields:", ", ".join(self.missing_ner_fields))
-            print(f"  NER Recall: {self.ner_metrics.get('ner_recall', 0.0):.2f}")
+        if self.missing_field_fields:
+            print("  Missing fields:", ", ".join(self.missing_field_fields))
+            print(f"  Field Recall: {self.field_metrics.get('field_recall', 0.0):.2f}")
 
     def perform_ocr(self):
         """Initializes and executes the PaddleOCR engine to retrieve raw text and spatial data."""
@@ -1946,9 +1946,9 @@ class DocumentForgeryDetector:
     def evaluate_logical_consistency(self):
         """Check date ordering rules and store critical logical issues."""
         self.forgery_issues = []
-        dob_raw = self.ner_entities.get("DATE OF BIRTH", {}).get("text", "")
-        doi_raw = self.ner_entities.get("DATE OF ISSUE", {}).get("text", "")
-        doe_raw = self.ner_entities.get("DATE OF EXPIRY", {}).get("text", "")
+        dob_raw = self.field_entities.get("DATE OF BIRTH", {}).get("text", "")
+        doi_raw = self.field_entities.get("DATE OF ISSUE", {}).get("text", "")
+        doe_raw = self.field_entities.get("DATE OF EXPIRY", {}).get("text", "")
 
         dob = self._parse_date_from_text(dob_raw)
         doi = self._parse_date_from_text(doi_raw)
@@ -1992,7 +1992,7 @@ class DocumentForgeryDetector:
         ocr_confidence_mean = float(np.mean([b.get('confidence', 0.0) for b in self.ocr_boxes])) if self.ocr_boxes else 0.0
 
         field_blur_values = []
-        for entity in self.ner_entities.values():
+        for entity in self.field_entities.values():
             bbox = entity.get('bbox')
             if not bbox or len(bbox) != 4:
                 continue
@@ -2022,10 +2022,10 @@ class DocumentForgeryDetector:
         # Feature Vector Assembly 
         self.forgery_features = {
             'Char_Count': total_chars,
-            'NER_Detected_Count': self.ner_metrics.get('detected_count', 0)
-                if hasattr(self, 'ner_metrics') else 0,
-            'NER_Completeness_Ratio': self.ner_metrics.get('ner_recall', 0.0)
-                if hasattr(self, 'ner_metrics') else 0.0,
+            'Field_Detected_Count': self.field_metrics.get('detected_count', 0)
+                if hasattr(self, 'field_metrics') else 0,
+            'Field_Completeness_Ratio': self.field_metrics.get('field_recall', 0.0)
+                if hasattr(self, 'field_metrics') else 0.0,
             'H_Mean': stats.get('height_mean', 0), 'H_STD': stats.get('height_std', 0),
             'W_Mean': stats.get('width_mean', 0), 'W_STD': stats.get('width_std', 0),
             'AR_Mean': stats.get('aspect_ratio_mean', 0), 'AR_STD': stats.get('aspect_ratio_std', 0),
@@ -2061,7 +2061,7 @@ class DocumentForgeryDetector:
             # 2. Identify Fields and Values using rule-based regex NER
             self.identify_critical_entities_from_ocr(print_summary=False)
             country = self.detect_country(self.ocr_full_text)
-            validation_issues = self.validate_fields(country, self.ner_entities)
+            validation_issues = self.validate_fields(country, self.field_entities)
             if validation_issues:
                 self.forgery_issues.extend(validation_issues)
             self.save_ocr_json(self.image_path)
@@ -2079,9 +2079,9 @@ class DocumentForgeryDetector:
             self.detect_anomalies(sensitivity=char_sensitivity)
             self.cluster_anomalous_regions()
             
-            # 5. Persist NER outputs/features
-            self.save_ner_json(self.image_path)
-            self.print_ner_fields_summary()
+            # 5. Persist Field outputs/features
+            self.save_field_json(self.image_path)
+            self.print_field_fields_summary()
             self.generate_training_features()
             self.generate_report() # This pre-calculates the verdict
 
@@ -2109,8 +2109,8 @@ class DocumentForgeryDetector:
             x1, y1, x2, y2 = box['bbox']
             cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 255), 2)
 
-        # 2. NER Fields (Green)
-        for field, data in self.ner_entities.items():
+        # 2. Field Entities (Green)
+        for field, data in self.field_entities.items():
             bbox = data.get("bbox")
             if not bbox or len(bbox) != 4:
                 continue
@@ -2167,12 +2167,12 @@ class DocumentForgeryDetector:
         report.append("-" * 80)
         report.append("Execution Log:"); report.extend([f"  {line}" for line in self.log]); report.append("-" * 80)
 
-        # Named Entities (Omitted for brevity, assumed included)
-        report.append("Named Entities (scoped fields):")
-        ner_keys_order = ['SURNAME', 'GIVEN NAME', 'FULL NAME', 'NATIONALITY', 'PASSPORT NO', 'ID CARD NO', 'PERSONAL NO', 'PLACE OF BIRTH', 'DATE OF BIRTH', 'SEX', 'HEIGHT', 'DATE OF ISSUE', 'DATE OF EXPIRY', 'AUTHORITY', 'SIGNATURE', 'MRZ LINE 1', 'MRZ LINE 2']
-        detected_keys = [k for k in ner_keys_order if k in self.ner_entities]
+        # Field Entities (Omitted for brevity, assumed included)
+        report.append("Field Entities (scoped fields):")
+        field_keys_order = ['SURNAME', 'GIVEN NAME', 'FULL NAME', 'NATIONALITY', 'PASSPORT NO', 'ID CARD NO', 'PERSONAL NO', 'PLACE OF BIRTH', 'DATE OF BIRTH', 'SEX', 'HEIGHT', 'DATE OF ISSUE', 'DATE OF EXPIRY', 'AUTHORITY', 'SIGNATURE', 'MRZ LINE 1', 'MRZ LINE 2']
+        detected_keys = [k for k in field_keys_order if k in self.field_entities]
         for entity in detected_keys:
-            data = self.ner_entities[entity]
+            data = self.field_entities[entity]
             bbox = data["bbox"]
             entity_value = data["text"]
             report.append(f" {entity.ljust(17)} : {entity_value}")

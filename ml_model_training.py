@@ -102,7 +102,7 @@ def load_dataset(path: str) -> pd.DataFrame:
         "OCR_Confidence_Mean": 0.0,
         "Field_Blur_Variance": 0.0,
         "Risk_Score": 0.0,
-        "NER_Field_Count": 0,
+        "Field_Count": 0,
         "Has_POB": 0,
         "Field_Completeness": 0.0,
         "OCR_Quality": 0.0,

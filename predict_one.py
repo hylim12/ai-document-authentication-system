@@ -43,14 +43,14 @@ def predict_single_document(image_path):
     feature_dict["Country_Code"] = raw_code
     feature_dict["Country_Name"] = country_name if country_name != "UNKNOWN" else country_map.get(raw_code, "UNKNOWN")
 
-    # Inject calibrated NER features
-    if hasattr(detector, "ner_entities"):
+    # Inject calibrated field features
+    if hasattr(detector, "field_entities"):
         feature_dict["Risk_Score"] = getattr(detector, "risk_score", 0.0)
-        feature_dict["NER_Field_Count"] = len(detector.ner_entities)
+        feature_dict["Field_Count"] = len(detector.field_entities)
 
         # Slovakia has no PLACE OF BIRTH expected
         if country_name != "SLOVAKIA":
-            feature_dict["Has_POB"] = int("PLACE OF BIRTH" in detector.ner_entities)
+            feature_dict["Has_POB"] = int("PLACE OF BIRTH" in detector.field_entities)
         else:
             feature_dict["Has_POB"] = 0
 

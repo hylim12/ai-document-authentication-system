@@ -1,4 +1,4 @@
-"""Utilities for post-NER semantic calibration and AML risk scoring."""
+"""Utilities for post-field semantic calibration and AML risk scoring."""
 
 from copy import deepcopy
 import re
@@ -47,7 +47,7 @@ def clean_personal_no(value):
 
 def calibrate_entities(entities, country=None, raw_lines=None):
     """
-    Post-process NER outputs to fix misaligned or invalid fields.
+    Post-process Field outputs to fix misaligned or invalid fields.
 
     Supports both:
     - {"FIELD": "value"}
