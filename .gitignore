@@ -3,6 +3,7 @@ datasets/
 
 # results
 final_results/
+distorted_images/
 
 # models
 *.csv
@@ -15,3 +16,4 @@ __pycache__/
 
 # environment variable
 .env
+
