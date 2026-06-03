@@ -4,6 +4,8 @@ datasets/
 # results
 final_results/
 distorted_images/
+*.png
+*.jpg
 
 # models
 *.csv
@@ -16,4 +18,5 @@ __pycache__/
 
 # environment variable
 .env
+torch_env/
 

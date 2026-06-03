@@ -2050,6 +2050,101 @@ class DocumentForgeryDetector:
         self.log.append(f"- Feature vector generated with {len(self.forgery_features)} metrics.")
         return self.forgery_features
     
+    def generate_feature_vector(self):
+
+        stats = self.baseline_stats or {}
+
+        total_chars = len(self.characters)
+
+        geo_anomalies = len([
+            a for a in self.anomalies
+            if "GLOBAL_HEIGHT_OUTLIER" in a.get("types", [])
+        ])
+
+        ink_anomalies = len([
+            a for a in self.anomalies
+            if "INK_INTENSITY_ANOMALY" in a.get("types", [])
+        ])
+
+        font_size_variance = stats.get("height_std", 0)
+
+        ocr_confidence_mean = np.mean([
+            b.get("confidence", 0)
+            for b in self.ocr_boxes
+        ]) if self.ocr_boxes else 0
+
+        field_blur_variance = cv2.Laplacian(
+            self.gray_original,
+            cv2.CV_64F
+        ).var()
+
+        self.forgery_features = {
+
+            'Char_Count': total_chars,
+
+            'Field_Detected_Count':
+                self.field_metrics.get('detected_core_count', 0)
+                if hasattr(self, 'field_metrics') else 0,
+
+            'Field_Completeness_Ratio':
+                self.field_metrics.get('field_recall', 0.0)
+                if hasattr(self, 'field_metrics') else 0.0,
+
+            'H_Mean': stats.get('height_mean', 0),
+            'H_STD': stats.get('height_std', 0),
+
+            'W_Mean': stats.get('width_mean', 0),
+            'W_STD': stats.get('width_std', 0),
+
+            'AR_Mean': stats.get('aspect_ratio_mean', 0),
+            'AR_STD': stats.get('aspect_ratio_std', 0),
+
+            'Ink_Mean': stats.get('ink_mean', 0),
+            'Ink_STD': stats.get('ink_std', 0),
+
+            'Grad_Mean': stats.get('grad_mean', 0),
+            'Grad_STD': stats.get('grad_std', 0),
+
+            'Ink_Density_Mean':
+                stats.get('density_mean', 0),
+
+            'Geo_Anomaly_Ratio':
+                geo_anomalies / (total_chars + 1e-6),
+
+            'Ink_Anomaly_Ratio':
+                ink_anomalies / (total_chars + 1e-6),
+
+            'BG_Mean':
+                self.background_stats.get('mean', 0)
+                if self.background_stats else 0,
+
+            'BG_STD':
+                self.background_stats.get('std', 0)
+                if self.background_stats else 0,
+
+            'OCR_Box_Anomalies_Count':
+                len(self.ocr_box_anomalies),
+
+            'BG_Anomaly_Line_Count':
+                len(self.background_anomalies),
+
+            'Clustered_Regions_Count':
+                len(self.suspicious_regions),
+
+            'Font_Size_Variance':
+                font_size_variance,
+
+            'OCR_Confidence_Mean':
+                ocr_confidence_mean,
+
+            'Field_Blur_Variance':
+                field_blur_variance,
+
+            'Risk_Score':
+                self.risk_score,
+        }
+
+        return self.forgery_features
 
     def process_document(self, char_sensitivity=2.0, bg_sensitivity=3.0, ocr_sensitivity=2.5, auto_save_png=True):
         """Orchestrates the full detection pipeline with mandatory sequence."""
