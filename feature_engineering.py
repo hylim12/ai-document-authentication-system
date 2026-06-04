@@ -30,7 +30,6 @@ except ImportError:
 warnings.filterwarnings('ignore')
 
 
-# LLM NER removed — using rule-based regex only
 extract_passport_fields_llm = None
 
 COUNTRY_REQUIRED_FIELDS = {
@@ -549,7 +548,7 @@ class DocumentForgeryDetector:
                 continue
             text_clean = box.get("text", "").strip()
 
-            # 🚫 REMOVE HEADER TEXT EARLY
+            # REMOVE HEADER TEXT EARLY
             if self._is_header_text(text_clean):
                 continue
 
@@ -646,11 +645,11 @@ class DocumentForgeryDetector:
 
             entities[field] = box
 
-        # 🚀 COUNTRY-SPECIFIC EXTRACTION
+        # COUNTRY-SPECIFIC EXTRACTION
         for field in required_fields:
             candidate = self.match_field_by_label(field, boxes)
             if candidate:
-                # 🚨 Skip PLACE OF BIRTH for Slovakia
+                # Skip PLACE OF BIRTH for Slovakia
                 if country == "SLOVAKIA" and field == "PLACE OF BIRTH":
                     continue
                 entities[field] = candidate
@@ -692,7 +691,7 @@ class DocumentForgeryDetector:
                         used.add(j)
                         break
 
-        # 🚀 ADVANCED GIVEN NAME EXTRACTION (LAYOUT-AWARE)
+        # ADVANCED GIVEN NAME EXTRACTION (LAYOUT-AWARE)
         for i, box in enumerate(boxes):
             if "GIVEN" in box["norm"] or "EMRI" in box["norm"]:
                 best_candidate = None
@@ -705,15 +704,15 @@ class DocumentForgeryDetector:
                     if is_label_like(candidate["norm"]):
                         continue
 
-                    # 🚨 Explicit blacklist for label-like tokens
+                    # Explicit blacklist for label-like tokens
                     if any(x in candidate["norm"] for x in ["MBIEMRI", "EMRI", "NAME", "SURNAME"]):
                         continue
 
-                    # 🚨 Reject short/noisy tokens
+                    # Reject short/noisy tokens
                     if len(candidate["text"]) < 3:
                         continue
 
-                    # 🚨 HARD CONSTRAINT: candidate MUST be below label
+                    # HARD CONSTRAINT: candidate MUST be below label
                     dy = candidate["bbox"][1] - box["bbox"][3]
                     if dy < 0:
                         continue
@@ -722,7 +721,7 @@ class DocumentForgeryDetector:
                     if self._looks_like_name(candidate["text"]):
                         score += 5  # stronger boost
 
-                    # 🚀 NO STRICT VALIDATION HERE (important for recall)
+                    # NO STRICT VALIDATION HERE (important for recall)
                     if score > best_score:
                         best_score = score
                         best_candidate = candidate
@@ -730,7 +729,7 @@ class DocumentForgeryDetector:
                 if best_candidate and best_score >= 5:
                     entities["GIVEN NAME"] = best_candidate
 
-        # 🚀 FALLBACK RULES
+        # FALLBACK RULES
         for box in boxes:
             text = box["text"].strip().upper()
 
@@ -840,7 +839,7 @@ class DocumentForgeryDetector:
         if len(mrz_lines) >= 2:
             mrz_data = self.mrz_parse_(mrz_lines)
 
-            # 🚀 MRZ IS GROUND TRUTH
+            # MRZ IS GROUND TRUTH
             for field, value in mrz_data.items():
                 if value:
                     entities[field] = {
@@ -854,7 +853,7 @@ class DocumentForgeryDetector:
                 self.log.append("- Country detected: LATVIA (optional HEIGHT expected if present).")
 
         if self._is_passport(boxes):
-            # 🚫 If passport detected, disable PERSONAL NO from OCR
+            # If passport detected, disable PERSONAL NO from OCR
             if "PERSONAL NO" in entities:
                 del entities["PERSONAL NO"]
 
@@ -883,19 +882,19 @@ class DocumentForgeryDetector:
                     dy_center = ((cy1 + cy2) / 2) - label_bottom
                     dx = abs(cx1 - box["bbox"][0])
 
-                    # 🚨 STRICT: must be clearly BELOW label (not overlapping)
+                    # STRICT: must be clearly BELOW label (not overlapping)
                     if dy_top < 10:
                         continue
 
-                    # 🚨 must not be too far
+                    # must not be too far
                     if dy_top > 150:
                         continue
 
-                    # 🚨 horizontal alignment
+                    # horizontal alignment
                     if dx > 200:
                         continue
 
-                    # 🚨 reject label-like words HARD
+                    # reject label-like words HARD
                     text_norm = candidate["norm"]
 
                     if is_label_like(text_norm):
@@ -904,11 +903,11 @@ class DocumentForgeryDetector:
                     if any(x in text_norm for x in ["MBIEMRI", "EMRI", "NAME", "SURNAME"]):
                         continue
 
-                    # 🚨 reject if same vertical band (this kills your bug)
+                    # reject if same vertical band (this kills your bug)
                     if abs(cy1 - label_top) < 20:
                         continue
 
-                    # 🚨 valid name check
+                    # valid name check
                     if not re.fullmatch(r"[A-Za-z]{3,}", candidate["text"]):
                         continue
 
@@ -947,7 +946,7 @@ class DocumentForgeryDetector:
                 if "SURNAME" in entities:
                     break
 
-        # 🚀 GIVEN NAME DERIVATION FROM SAME LINE
+        # GIVEN NAME DERIVATION FROM SAME LINE
         if "SURNAME" in entities and "GIVEN NAME" not in entities:
             surname = entities["SURNAME"]["text"]
 
@@ -1013,7 +1012,7 @@ class DocumentForgeryDetector:
                 if "," in box["text"] and not any(char.isdigit() for char in box["text"]):
                     assign_if_valid("PLACE OF BIRTH", box)
 
-        # 🚀 DERIVE NATIONALITY FROM PLACE OF BIRTH
+        # DERIVE NATIONALITY FROM PLACE OF BIRTH
         if country != "SLOVAKIA":
             if "NATIONALITY" not in entities and "PLACE OF BIRTH" in entities:
                 pob_text = entities["PLACE OF BIRTH"]["text"].upper()
@@ -1148,7 +1147,7 @@ class DocumentForgeryDetector:
 
         self._validate_dates(entities)
 
-        # 🚫 PREVENT GIVEN NAME = SURNAME
+        # PREVENT GIVEN NAME = SURNAME
         if "GIVEN NAME" in entities and "SURNAME" in entities:
             if entities["GIVEN NAME"]["text"] == entities["SURNAME"]["text"]:
                 # Keep SURNAME, remove GIVEN NAME
@@ -1189,7 +1188,7 @@ class DocumentForgeryDetector:
             if best_candidate:
                 entities["GIVEN NAME"] = best_candidate
 
-        # 🚀 FALLBACK GIVEN NAME FROM NEARBY TEXT
+        # FALLBACK GIVEN NAME FROM NEARBY TEXT
         if "SURNAME" in entities and "GIVEN NAME" not in entities:
             surname_box = entities["SURNAME"]["bbox"]
 
@@ -1239,12 +1238,12 @@ class DocumentForgeryDetector:
             if best_candidate:
                 entities["PERSONAL NO"] = best_candidate
 
-        # 🚫 FINAL CLEANUP PASS
+        # FINAL CLEANUP PASS
         for field, data in list(entities.items()):
             if self._is_header_text(data["text"]):
                 del entities[field]
 
-        # 🚫 REMOVE SIGNATURE LEAKS
+        # REMOVE SIGNATURE LEAKS
         for field, data in list(entities.items()):
             text = data["text"].upper()
             if "SIGNATURE" in text or "FIRMA" in text:
@@ -1278,7 +1277,7 @@ class DocumentForgeryDetector:
                     "confidence": 0.99
                 }
 
-        # 🚨 FINAL FAILSAFE
+        # FINAL FAILSAFE
         if "NATIONALITY" not in entities or not entities["NATIONALITY"]["text"].strip():
             fallback_nationality = country if country and country != "UNKNOWN" else "UNSPECIFIED"
             entities["NATIONALITY"] = {
@@ -1468,7 +1467,7 @@ class DocumentForgeryDetector:
             "field_recall": len(detected_core) / len(core_fields),
         }
 
-        # 🚀 ADD PRECISION + F1 FOR FIELD EXTRACTION
+        # ADD PRECISION + F1 FOR FIELD EXTRACTION
         detected_total = len(normalized_detected)
         expected_total = len(core_fields)
 

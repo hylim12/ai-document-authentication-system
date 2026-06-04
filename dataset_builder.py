@@ -73,7 +73,7 @@ def process_dataset(folder_path, dataset_name):
             features["Num_Background_Anomalies"] = len(getattr(detector, "background_anomalies", []))
             features["Num_OCR_Box_Anomalies"] = len(getattr(detector, "ocr_box_anomalies", []))
 
-            # 🚀 AML + CV METRICS
+            # AML + CV METRICS
 
             # OCR Quality (Text Extraction Reliability)
             features["OCR_Quality"] = features.get("OCR_Confidence_Mean", 0)
