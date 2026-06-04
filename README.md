@@ -3,233 +3,318 @@
 **Author:** Eldeena Lim Huey Yinn  
 **Supervisor:** Prof. Ts. Dr. Tee Connie  
 **Institution:** Faculty of Information Science and Technology, Multimedia University (MMU)  
-**Academic Year:** 2025/2026  
+**Academic Year:** 2025/2026
 
 ---
 
-# 1. Introduction
+## 1. Overview
 
-The increasing sophistication of document forgery techniques presents a significant challenge to Anti-Money Laundering (AML) compliance processes. Traditional manual verification methods are often insufficient due to human limitations such as fatigue, subjectivity, and inconsistency.
+This repository implements an AI-assisted identity-document authentication pipeline for AML/KYC document screening. The current codebase combines:
 
-This project proposes an automated document authentication system that integrates **Computer Vision (CV)**, **Named Entity Recognition (NER)**, and **Machine Learning (ML)** to detect forged identity documents. The system aims to enhance detection accuracy, improve operational efficiency, and provide explainable outputs suitable for compliance auditing.
+- **Computer vision (CV)** feature extraction for typography, ink, edge-gradient, background, OCR-box, and clustered-region anomalies.
+- **PaddleOCR-based OCR** with multiple image variants to improve text and bounding-box recovery.
+- **Rule-based NER / field extraction** using multilingual regular-expression labels, MRZ parsing, spatial matching, and country-specific calibration.
+- **Country-aware validation** for identity fields such as nationality, document numbers, personal numbers, sex, and date ordering.
+- **Leakage-aware supervised ML** using a scikit-learn Random Forest pipeline for binary classification of documents as authentic or forged.
+- **Explainability outputs** including JSON OCR/field exports, feature vectors, risk scores, terminal reports, and annotated PNG visualizations.
 
----
-
-# 2. Objectives
-
-The primary objectives of this system are as follows:
-
-- To extract forensic features from identity documents using computer vision techniques  
-- To perform semantic validation using Named Entity Recognition (NER)  
-- To detect anomalies indicative of document forgery  
-- To classify documents as *Authentic* or *Forged* using supervised machine learning  
-- To provide interpretable results through visual and quantitative analysis  
+The implementation is currently focused on documents from **Albania (ALB)**, **Latvia (LVA)**, and **Slovakia (SVK)**.
 
 ---
 
-# 3. System Architecture
+## 2. Current Pipeline
 
-The overall system pipeline is illustrated below:
-
-dataset_builder.py -> train.csv / val.csv / test.csv -> ml_model_training.ipynb (Model Training + Evaluation) -> trained_model.pkl -> predict_one.py (Inference)
-
-
-The system is designed to ensure consistency between training and inference pipelines, thereby maintaining robustness and reproducibility.
-
----
-
-# 4. Methodology
-
-## 4.1 Feature Extraction (Computer Vision)
-
-The system performs multi-level feature extraction, including:
-
-- **Character-Level Features:** height, width, aspect ratio, ink density  
-- **Structural Features:** alignment, spacing, layout consistency  
-- **Background Features:** intensity distribution and texture anomalies  
-
-Image preprocessing techniques such as CLAHE (Contrast Limited Adaptive Histogram Equalization) and Otsu’s binarization are applied to enhance feature quality.
-
----
-
-## 4.2 Optical Character Recognition and NER
-
-Text is extracted using PaddleOCR, followed by rule-based Named Entity Recognition to identify key document fields such as:
-
-- Name  
-- Date of Birth  
-- Document Number  
-- Nationality  
-
-Logical validation is performed to ensure consistency (e.g., chronological order of dates).
+```text
+images in datasets/{training_set,validation_set,testing_set}/
+        │
+        ▼
+dataset_builder.py
+        │  extracts CV/OCR/NER/risk features and labels from filenames
+        ▼
+dataset_outputs/{train.csv,val.csv,test.csv}
+        │
+        ▼
+ml_model_training.py
+        │  trains leakage-aware sklearn Pipeline(RandomForestClassifier)
+        ▼
+trained_models/forged_document_rf_model.pkl
+trained_models/feature_preprocessor.pkl
+trained_models/training_metrics.json
+        │
+        ▼
+predict_one.py
+        │  runs single-document inference with feature alignment
+        ▼
+ML_Verdict_PNGs/<image>_ML_PREDICTION.png
+```
 
 ---
 
-## 4.3 Forensic Anomaly Detection
+## 3. Repository Structure
 
-Statistical anomaly detection is applied using Z-score analysis to identify irregularities in:
-
-- Character geometry  
-- Ink intensity  
-- Edge gradients  
-- Background consistency  
-
-Detected anomalies are aggregated and used to compute a document-level risk score.
-
----
-
-## 4.4 Machine Learning Classification
-
-A Random Forest classifier is employed to perform binary classification:
-
-- Class 0: Authentic  
-- Class 1: Forged  
-
-The model is trained using features derived from CV, NER, and anomaly detection processes.
+| Path | Purpose |
+| --- | --- |
+| `feature_engineering.py` | Main document-processing engine. Loads/resizes images, performs PaddleOCR, extracts fields, validates country-specific values, detects anomalies, builds ML features, saves JSON outputs, and renders annotated PNGs. |
+| `dataset_builder.py` | Batch feature-extraction script for `datasets/training_set`, `datasets/validation_set`, and `datasets/testing_set`. Produces `dataset_outputs/train.csv`, `val.csv`, and `test.csv`. |
+| `ml_model_training.py` | Leakage-aware Random Forest training/evaluation script. Saves the full sklearn pipeline, preprocessor, and metrics JSON under `trained_models/`. |
+| `predict_one.py` | Single-image inference script. Loads the saved Random Forest pipeline, extracts aligned features for one image, predicts `AUTHENTIC` or `FORGED`, and writes an ML verdict visualization. |
+| `prompts/regex_passport_patterns.py` | Multilingual regex label patterns for field extraction. |
+| `utils/calibration.py` | Entity cleanup, country-specific calibration, derived nationality handling, and rule-based risk scoring helpers. |
+| `utils/validators.py` | Reusable validators for normalized nationality, personal number, document number, and sex fields. |
 
 ---
 
-# 5. Evaluation Methodology
+## 4. Supported Inputs and Labels
 
-All evaluation procedures are conducted within the Jupyter Notebook (`ml_model_training.ipynb`) to ensure transparency and reproducibility.
+### 4.1 Dataset Folders
 
----
+The scripts expect this dataset layout:
 
-## 5.1 Machine Learning Metrics
+```text
+datasets/
+  training_set/
+    *.jpg / *.jpeg / *.png
+  validation_set/
+    *.jpg / *.jpeg / *.png
+  testing_set/
+    *.jpg / *.jpeg / *.png
+```
 
-The following performance metrics are used:
+### 4.2 Label Convention
 
-- Accuracy  
-- Precision  
-- Recall (Detection Rate)  
-- F1-score  
-- Specificity  
-- False Positive Rate (FPR)  
-- Receiver Operating Characteristic – Area Under Curve (ROC-AUC)  
+`dataset_builder.py` derives the ground-truth label from each filename:
 
----
+- Filename contains `fake` or `forged` → `Label = 1` (**FORGED**)
+- Otherwise → `Label = 0` (**AUTHENTIC**)
 
-## 5.2 NER Evaluation Metrics
+Examples:
 
-To assess the effectiveness of information extraction:
+```text
+alb_id_01_fake.jpg    -> 1
+lva_passport_real.jpg -> 0
+svk_id_forged.png     -> 1
+```
 
-- Field Extraction Completeness (Recall)  
-- Precision  
-- F1-score  
-- Missing Field Analysis  
+### 4.3 Supported Country Codes
 
----
+The current country-aware logic maps OCR-detected country names to:
 
-## 5.3 CV + AML Hybrid Metrics (Proposed)
-
-This project introduces domain-specific evaluation metrics:
-
-- **OCR Confidence Mean** (Text Extraction Reliability)  
-- **Risk Score** (Forgery likelihood indicator)  
-- **Risk Consistency Score** (alignment between anomalies and risk)  
-- **Field Completeness Rate**  
-
-These metrics provide a more comprehensive evaluation aligned with AML requirements.
-
----
-
-# 6. Implementation Details
-
-## 6.1 File Descriptions
-
-### `feature_engineering.py`
-Core module responsible for:
-- Image preprocessing  
-- Feature extraction  
-- OCR and NER processing  
-- Anomaly detection  
+| Country | Code |
+| --- | --- |
+| Albania | `ALB` |
+| Latvia | `LVA` |
+| Slovakia | `SVK` |
+| Unknown / unsupported | `UNK` |
 
 ---
 
-### `dataset_builder.py`
-Generates structured datasets by:
-- Processing image folders  
-- Extracting features  
-- Assigning ground truth labels  
-- Exporting CSV files  
+## 5. Feature Engineering Summary
+
+`DocumentForgeryDetector` in `feature_engineering.py` generates a structured feature vector that includes:
+
+### 5.1 OCR and Field Features
+
+- OCR mean confidence (`OCR_Confidence_Mean`)
+- Detected core-field count (`Field_Detected_Count`)
+- Core-field completeness ratio (`Field_Completeness_Ratio`)
+- Country-specific field presence such as `Has_POB`
+- Rule-based extracted fields such as surname, given name, nationality, document number, personal number, dates, sex, authority, signature, height, and MRZ lines
+
+### 5.2 Character and Layout Features
+
+- Character count (`Char_Count`)
+- Height / width / aspect-ratio mean and standard deviation
+- Font-size variance
+- Ink intensity and ink-density statistics
+- Edge-gradient statistics
+
+### 5.3 Anomaly Features
+
+- Geometric anomaly ratio
+- Ink anomaly ratio
+- OCR-box anomaly count
+- Background anomaly line count
+- Clustered suspicious-region count
+- Number of character, background, and OCR-box anomalies
+
+### 5.4 AML-Oriented Risk Features
+
+- Composite `Risk_Score` normalized to `0..100`
+- Logical date-ordering issues
+- Country-specific document-field validation issues
+- OCR quality and field-completeness proxy features used by dataset building and inference
 
 ---
 
-### `ml_model_training.ipynb`
-Primary experimental environment:
-- Model training  
-- Performance evaluation  
-- Metric computation  
-- Result visualization  
+## 6. Model Training Details
+
+`ml_model_training.py` trains a scikit-learn `Pipeline` with:
+
+- `ColumnTransformer` preprocessing
+  - Median imputation for numeric features
+  - Most-frequent imputation + one-hot encoding for `Country_Code` / `Country_Name`
+- `RandomForestClassifier`
+  - `n_estimators=350`
+  - `random_state=42`
+  - `class_weight="balanced"`
+
+The training script includes safeguards against data leakage:
+
+- Drops direct identity/label-leaking columns such as `Image_Name`, `Document_ID`, and `Detection_Label`
+- Drops pre-encoded country columns such as `Country_Code_*` and `Country_Name_*`
+- Rejects columns whose names contain suspicious label tokens such as `fake`, `real`, `forged`, or `authentic`
+- Drops near-perfect single-feature separators discovered from the training split only (`AUC >= 0.995`)
+- Aligns test features to the training feature set before evaluation
+
+Evaluation metrics written to `trained_models/training_metrics.json` include:
+
+- Accuracy
+- Precision
+- Recall / detection rate
+- F1-score
+- Specificity
+- False positive rate
+- ROC-AUC
+- Confusion-matrix counts (`tn`, `fp`, `fn`, `tp`)
+- Feature columns used by the trained model
+- Dropped overpowered features
 
 ---
 
-### `predict_one.py`
-Deployment script for:
-- Single-document inference  
-- Prediction output  
-- Visualization generation  
+## 7. Setup
+
+A minimal Python environment should include the libraries imported by the codebase:
+
+```bash
+pip install opencv-python numpy matplotlib pillow pandas scikit-learn paddleocr
+```
+
+Notes:
+
+- `paddleocr` is optional at import time, but OCR will be unavailable if it is not installed.
+- The current OCR engine is initialized with CPU mode (`use_gpu=False`).
+- If your PaddleOCR installation requires PaddlePaddle separately, install the CPU or GPU PaddlePaddle package recommended for your platform before running the pipeline.
 
 ---
 
-# 7. Usage Instructions
+## 8. Usage
 
-## 7.1 Dataset Generation
+### 8.1 Build Datasets
 
+```bash
 python dataset_builder.py
-This produces:
+```
 
-dataset_outputs/
-    train.csv
-    val.csv
-    test.csv
+Expected CSV outputs:
 
-## 7.2 Model Training and Evaluation
+```text
+dataset_outputs/train.csv
+dataset_outputs/val.csv
+dataset_outputs/test.csv
+```
 
-Open and execute:
-- ml_model_training.ipynb
+During processing, the detector also writes OCR/field JSON and analysis PNG artifacts for processed documents.
 
-Outputs include:
-- Trained model (.pkl)
-- Performance metrics
-- Evaluation visualizations
+### 8.2 Train and Evaluate the Model
 
-## 7.3 Inference
+```bash
+python ml_model_training.py
+```
+
+Expected model outputs:
+
+```text
+trained_models/forged_document_rf_model.pkl
+trained_models/feature_preprocessor.pkl
+trained_models/training_metrics.json
+```
+
+### 8.3 Run Single-Document Inference
+
+Edit `NEW_IMAGE_PATH` in `predict_one.py` to point at the image you want to classify, then run:
+
+```bash
 python predict_one.py
+```
 
-Outputs:
-- Classification result
-- Confidence score
-- Annotated visualization
+Expected inference output:
 
-# 8. Data Integrity and Validity
+- Terminal verdict: `AUTHENTIC` or `FORGED`
+- Confidence percentage
+- Class probabilities for genuine (`0`) and forged (`1`)
+- Annotated visualization under `ML_Verdict_PNGs/`
 
-To ensure methodological correctness:
+---
 
-Features that directly encode labels (e.g., Detection_Label) are excluded
-Training and inference pipelines use consistent feature sets
-Evaluation is performed on unseen test data
+## 9. Generated Artifacts
 
-These measures prevent data leakage and ensure reliable performance estimation.
+Depending on which scripts you run, the repository may generate:
 
-# 9. Contributions
+```text
+dataset_outputs/
+  train.csv
+  val.csv
+  test.csv
 
-This project contributes the following:
+trained_models/
+  forged_document_rf_model.pkl
+  feature_preprocessor.pkl
+  training_metrics.json
 
-A hybrid CV–NER–ML framework for document authentication
-Novel AML-oriented evaluation metrics
-An explainable system with visual anomaly localization
-A scalable pipeline adaptable to multi-country datasets
+final_results/PNG_results/
+  <image>_analysis.png
 
-# 10. Limitations and Future Work
+final_results/results/OCR_JSON_results/
+  <image>.json
 
-Future enhancements may include:
+final_results/results/FIELD_JSON_results/
+  <image>.json
 
-Deep learning architectures (e.g., CNNs, Vision Transformers)
-Expansion to additional document types
-Integration with cloud-based AML systems (e.g., AWS deployment)
-Real-time processing capabilities
+ML_Verdict_PNGs/
+  <image>_ML_PREDICTION.png
+```
 
-# 11.  Conclusion
+---
 
-This project demonstrates the feasibility of integrating computer vision, semantic analysis, and machine learning to address document forgery detection within AML systems. The proposed approach provides a robust, interpretable, and scalable solution suitable for real-world compliance applications.
+## 10. Data Integrity Notes
+
+The current implementation is designed to reduce leakage and keep training/inference consistent:
+
+- Filename-derived labels are used only as the target label during dataset generation.
+- Label-bearing filenames and explicit detection labels are dropped before training.
+- Country is handled as a categorical feature inside the saved sklearn pipeline.
+- Inference uses the saved pipeline's expected feature names and fills missing runtime features with safe defaults.
+- Slovakia-specific logic disables `Has_POB` because place of birth is not expected for the supported Slovakian document configuration.
+
+---
+
+## 11. Known Operational Notes
+
+- The pipeline is file-path driven; dataset paths and the sample inference image path are constants in the scripts.
+- OCR quality strongly affects field extraction, risk scoring, and downstream model confidence.
+- Rule-based NER is intentionally deterministic and auditable; no LLM-based NER is active in the current code.
+- The model must be retrained after changing feature definitions or dataset composition.
+- The current codebase supports ALB/LVA/SVK logic; new countries require updates to regex patterns, calibration rules, validators, country detection, and required/optional field definitions.
+
+---
+
+## 12. Recommended End-to-End Workflow
+
+```bash
+# 1. Add labeled document images to datasets/training_set, validation_set, and testing_set
+
+# 2. Generate feature CSVs
+python dataset_builder.py
+
+# 3. Train and evaluate the model
+python ml_model_training.py
+
+# 4. Update NEW_IMAGE_PATH in predict_one.py, then run inference
+python predict_one.py
+```
+
+---
+
+## 13. Project Contribution
+
+This project contributes a hybrid document-authentication workflow for AML use cases by combining forensic CV features, deterministic OCR/NER validation, country-aware rule checks, leakage-aware ML training, and explainable output artifacts suitable for compliance review.
