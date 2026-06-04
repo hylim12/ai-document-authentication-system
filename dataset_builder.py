@@ -8,7 +8,7 @@ using the feature engineering pipeline.
 
 import os
 import pandas as pd
-from feature_engineering import DocumentForgeryDetector
+from feature_engineering import DocumentForgeryDetector, extract_country_code
 
 # Dataset paths
 DATASET_ROOT = "datasets"
@@ -59,12 +59,13 @@ def process_dataset(folder_path, dataset_name):
             # Field features
             features["Field_Count"] = len(getattr(detector, "field_entities", {}))
 
-            country_name = detector.detect_country(getattr(detector, "ocr_full_text", ""))
-            country_to_code = {"ALBANIA": "ALB", "LATVIA": "LVA", "SLOVAKIA": "SVK"}
-            raw_code = country_to_code.get(country_name, "UNK")
+            # Country code from filename
+            raw_code = extract_country_code(file)
 
-            if country_name != "SLOVAKIA":
-                features["Has_POB"] = int("PLACE OF BIRTH" in getattr(detector, "field_entities", {}))
+            if raw_code != "SVK":
+                features["Has_POB"] = int(
+                    "PLACE OF BIRTH" in getattr(detector, "field_entities", {})
+                )
             else:
                 features["Has_POB"] = 0
 

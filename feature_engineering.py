@@ -1811,7 +1811,7 @@ class DocumentForgeryDetector:
             if not PaddleOCR:
                 self.ocr_full_text = "OCR NOT AVAILABLE"
                 return
-            self.ocr_engine = PaddleOCR(use_angle_cls=True, lang='en', use_gpu=False, show_log=False)
+            self.ocr_engine = PaddleOCR(use_angle_cls=True, lang='en', show_log=False)
 
         all_boxes = []
         variants = self._generate_ocr_variants()
