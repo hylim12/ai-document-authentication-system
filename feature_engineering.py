@@ -466,24 +466,20 @@ class DocumentForgeryDetector:
         return self.suspicious_regions
 
     def _is_header_text(self, text):
-        text = str(text or "").upper().replace(" ", "")
+        """Return True only for document header text, not long NER values."""
+        normalized = unicodedata.normalize("NFKD", str(text or "").upper())
+        normalized = "".join(c for c in normalized if not unicodedata.combining(c))
+        normalized = re.sub(r"[^A-Z0-9]", "", normalized)
 
-        blacklist = [
+        header_markers = [
             "REPUBLIK",
             "REPUBLIC",
-            "SHQIP",
-            "ALBANIA",
             "LETERNJOFTIM",
             "PASSPORT",
-            "LATVIJ",
-            "SLOVENSK"
+            "SLOVENSKAREPUBLIKA",
         ]
 
-        # Reject long uppercase strings (very important)
-        if len(text) > 15:
-            return True
-
-        return any(word in text for word in blacklist)
+        return any(marker in normalized for marker in header_markers)
 
     def _validate_dates(self, entities):
         def _parse_date(value):
