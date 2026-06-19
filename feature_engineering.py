@@ -2364,11 +2364,6 @@ class DocumentForgeryDetector:
 
         fig = plt.figure(figsize=(18, 7))
 
-        if verdict:
-            verdict_label = f"Verdict: {verdict.title()}"
-            verdict_color = "darkred" if verdict == "FORGED" else "darkgreen"
-            fig.suptitle(verdict_label, fontsize=18, weight="bold", color=verdict_color)
-
         ax1 = fig.add_subplot(1, 2, 1)
         ax1.imshow(orig_rgb)
         ax1.set_title("Original Document", fontsize=14, weight="bold")
