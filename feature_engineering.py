@@ -1789,14 +1789,27 @@ class DocumentForgeryDetector:
         self.log.append(f"- FIELD JSON saved: {field_json_path}")
         return field_json_path
 
+    def _ordered_display_fields(self):
+        """Return the complete, stable list of fields shown in terminal output."""
+        preferred_order = [
+            "SURNAME", "GIVEN NAME", "FULL NAME", "NATIONALITY",
+            "PASSPORT NO", "ID CARD NO", "PERSONAL NO", "PLACE OF BIRTH",
+            "DATE OF BIRTH", "SEX", "HEIGHT", "DATE OF ISSUE",
+            "DATE OF EXPIRY", "AUTHORITY", "SIGNATURE", "MRZ LINE 1",
+            "MRZ LINE 2",
+        ]
+        extra_fields = sorted(
+            field for field in self.field_entities if field not in preferred_order
+        )
+        return preferred_order + extra_fields
+
     def print_field_fields_summary(self):
-        """Print current field entity summary to terminal."""
-        print("\n[FIELD FIELDS]")
-        for k in sorted(self.field_entities):
-            print(f"  {k:18s}: {self.field_entities[k]['text']}")
-        print("\n[CALIBRATED FIELD FIELDS]")
-        for k in sorted(self.field_entities):
-            print(f"  {k:18s}: {self.field_entities[k]['text']}")
+        """Print all supported field names and their current extracted values."""
+        print("\n[FIELD VALUES]")
+        for field in self._ordered_display_fields():
+            value = self.field_entities.get(field, {}).get("text", "")
+            print(f"  {field:18s}: {value if value else 'N/A'}")
+
         print(f"\n[⚠️ RISK SCORE]: {int(self.risk_score)}")
         print(f"[⚠️ ISSUES]: {self.risk_issues}")
         if self.missing_field_fields:
@@ -2194,6 +2207,7 @@ class DocumentForgeryDetector:
             verdict = self.ml_verdict
             show_anomalies = verdict == "FORGED"
         else:
+            verdict = None
             show_anomalies = True
 
         vis = self.display_image.copy()
@@ -2222,6 +2236,11 @@ class DocumentForgeryDetector:
         vis_rgb  = cv2.cvtColor(vis, cv2.COLOR_BGR2RGB)
 
         fig = plt.figure(figsize=(18, 7))
+
+        if verdict:
+            verdict_label = f"Verdict: {verdict.title()}"
+            verdict_color = "darkred" if verdict == "FORGED" else "darkgreen"
+            fig.suptitle(verdict_label, fontsize=18, weight="bold", color=verdict_color)
 
         ax1 = fig.add_subplot(1, 2, 1)
         ax1.imshow(orig_rgb)
