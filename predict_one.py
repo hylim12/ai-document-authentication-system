@@ -123,5 +123,5 @@ if __name__ == "__main__":
     print(f"  Genuine (0): {probabilities[0]:.4f}")
     print(f"  Forged  (1): {probabilities[1]:.4f}")
 
-    print("\n[INFO] Visualization saved to PNG_results/")
+    print("\n[INFO] Visualization saved to ML_Verdict_PNGs/")
     print("========================================================")
