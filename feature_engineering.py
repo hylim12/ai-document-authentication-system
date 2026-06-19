@@ -1310,6 +1310,7 @@ class DocumentForgeryDetector:
         )
 
         self.field_entities = derive_nationality(self.field_entities)
+        self.recover_missing_fields_from_ocr()
         if "NATIONALITY" not in self.field_entities or not self.field_entities["NATIONALITY"].get("text", "").strip() or self.field_entities["NATIONALITY"].get("text", "").strip().upper() == "UNKNOWN":
             fallback_nationality = country if country and country != "UNKNOWN" else "UNSPECIFIED"
             self.field_entities["NATIONALITY"] = {
@@ -1329,6 +1330,110 @@ class DocumentForgeryDetector:
 
         if print_summary:
             self.print_field_fields_summary()
+
+    def recover_missing_fields_from_ocr(self):
+        """Best-effort recovery for field values when label-based extraction is sparse."""
+        if not getattr(self, "ocr_boxes", None):
+            return
+
+        def put(field, box, confidence=0.75):
+            if self.field_entities.get(field, {}).get("text"):
+                return
+            self.field_entities[field] = {
+                "text": str(box.get("text", "")).strip(),
+                "bbox": box.get("bbox", (0, 0, 0, 0)),
+                "confidence": float(box.get("confidence", confidence) or confidence),
+            }
+
+        boxes = sorted(self.ocr_boxes, key=lambda b: (b.get("bbox", (0, 0, 0, 0))[1], b.get("bbox", (0, 0, 0, 0))[0]))
+        text_boxes = [b for b in boxes if str(b.get("text", "")).strip()]
+        if not text_boxes:
+            return
+
+        country = self.detect_country(getattr(self, "ocr_full_text", ""))
+        if country == "ALBANIA" and not self.field_entities.get("NATIONALITY", {}).get("text"):
+            self.field_entities["NATIONALITY"] = {"text": "ALBANIAN", "bbox": (0, 0, 0, 0), "confidence": 0.99}
+
+        # Pattern-based values that do not require a nearby label.
+        date_boxes = []
+        for box in text_boxes:
+            text = str(box.get("text", "")).strip()
+            upper = text.upper()
+            cleaned = re.sub(r"[^A-Z0-9]", "", upper)
+
+            if re.fullmatch(r"\d{6,10}", cleaned):
+                put("ID CARD NO", box)
+            elif re.fullmatch(r"[A-Z]\d{7,9}[A-Z]", cleaned):
+                put("PERSONAL NO", box)
+            elif upper in {"M", "F"}:
+                put("SEX", box)
+            elif re.fullmatch(r"[A-Z]{2,5}", upper) and upper not in {"ALB", "LVA", "SVK"}:
+                put("AUTHORITY", box, confidence=0.65)
+
+            parsed_date = self._parse_date_from_text(text)
+            if parsed_date:
+                date_boxes.append((parsed_date, box))
+
+            if country != "SLOVAKIA" and "," in text and not re.search(r"\d", text):
+                put("PLACE OF BIRTH", box)
+
+        if len(date_boxes) >= 3:
+            for field, (_, box) in zip(
+                ["DATE OF BIRTH", "DATE OF ISSUE", "DATE OF EXPIRY"],
+                sorted(date_boxes, key=lambda item: item[0]),
+            ):
+                put(field, box)
+
+        # Label-neighbor recovery for names and any values that OCR kept near labels.
+        label_to_field = {
+            "SURNAME": "SURNAME",
+            "MBIEM": "SURNAME",
+            "GIVEN": "GIVEN NAME",
+            "EMRI": "GIVEN NAME",
+            "NATIONAL": "NATIONALITY",
+            "SHTET": "NATIONALITY",
+            "BIRTH": "DATE OF BIRTH",
+            "LIND": "DATE OF BIRTH",
+            "ISSUE": "DATE OF ISSUE",
+            "LESH": "DATE OF ISSUE",
+            "EXPIR": "DATE OF EXPIRY",
+            "SKAD": "DATE OF EXPIRY",
+            "AUTHORITY": "AUTHORITY",
+            "AUTOR": "AUTHORITY",
+        }
+
+        for label_box in text_boxes:
+            label_text = str(label_box.get("text", "")).upper()
+            target_field = next((field for token, field in label_to_field.items() if token in label_text), None)
+            if not target_field or self.field_entities.get(target_field, {}).get("text"):
+                continue
+
+            lx1, ly1, lx2, ly2 = label_box.get("bbox", (0, 0, 0, 0))
+            best = None
+            best_score = -1
+            for candidate in text_boxes:
+                if candidate is label_box:
+                    continue
+                candidate_text = str(candidate.get("text", "")).strip()
+                if not candidate_text or self._is_header_text(candidate_text):
+                    continue
+                if any(token in candidate_text.upper() for token in label_to_field):
+                    continue
+
+                cx1, cy1, cx2, cy2 = candidate.get("bbox", (0, 0, 0, 0))
+                dy = cy1 - ly2
+                dx = abs(cx1 - lx1)
+                if not (0 <= dy <= 120 and dx <= 260):
+                    continue
+                if not self._is_valid_for_field(target_field, candidate_text):
+                    continue
+                score = (120 - dy) + (260 - dx)
+                if score > best_score:
+                    best = candidate
+                    best_score = score
+
+            if best:
+                put(target_field, best)
 
     def parse_mrz_dates(self, mrz_lines):
         try:
@@ -1789,14 +1894,49 @@ class DocumentForgeryDetector:
         self.log.append(f"- FIELD JSON saved: {field_json_path}")
         return field_json_path
 
+    def _ordered_display_fields(self):
+        """Return the complete, stable list of fields shown in terminal output."""
+        preferred_order = [
+            "SURNAME", "GIVEN NAME", "FULL NAME", "NATIONALITY",
+            "PASSPORT NO", "ID CARD NO", "PERSONAL NO", "PLACE OF BIRTH",
+            "DATE OF BIRTH", "SEX", "HEIGHT", "DATE OF ISSUE",
+            "DATE OF EXPIRY", "AUTHORITY", "SIGNATURE", "MRZ LINE 1",
+            "MRZ LINE 2",
+        ]
+        extra_fields = sorted(
+            field for field in self.field_entities if field not in preferred_order
+        )
+        return preferred_order + extra_fields
+
+    def _entity_text(self, field):
+        """Return printable text for a field entity, regardless of payload shape."""
+        value = self.field_entities.get(field, {})
+        if isinstance(value, dict):
+            return str(value.get("text", "") or "").strip()
+        return str(value or "").strip()
+
+    def _field_value_from_aliases(self, field):
+        """Return field text while tolerating common field-name variants."""
+        aliases = {
+            "SURNAME": ["SURNAME", "LAST NAME", "FAMILY NAME"],
+            "GIVEN NAME": ["GIVEN NAME", "FIRST NAME", "NAME"],
+            "PASSPORT NO": ["PASSPORT NO", "PASSPORT NUMBER", "DOCUMENT NO"],
+            "ID CARD NO": ["ID CARD NO", "CARD NO", "DOCUMENT NO"],
+            "PERSONAL NO": ["PERSONAL NO", "PERSONAL NUMBER", "PERSONAL ID"],
+        }
+        for key in aliases.get(field, [field]):
+            text = self._entity_text(key)
+            if text:
+                return text
+        return ""
+
     def print_field_fields_summary(self):
-        """Print current field entity summary to terminal."""
-        print("\n[FIELD FIELDS]")
-        for k in sorted(self.field_entities):
-            print(f"  {k:18s}: {self.field_entities[k]['text']}")
-        print("\n[CALIBRATED FIELD FIELDS]")
-        for k in sorted(self.field_entities):
-            print(f"  {k:18s}: {self.field_entities[k]['text']}")
+        """Print all supported field names and their current extracted values."""
+        print("\n[FIELD VALUES]")
+        for field in self._ordered_display_fields():
+            value = self._field_value_from_aliases(field)
+            print(f"  {field:18s}: {value if value else 'N/A'}")
+
         print(f"\n[⚠️ RISK SCORE]: {int(self.risk_score)}")
         print(f"[⚠️ ISSUES]: {self.risk_issues}")
         if self.missing_field_fields:
@@ -2194,6 +2334,7 @@ class DocumentForgeryDetector:
             verdict = self.ml_verdict
             show_anomalies = verdict == "FORGED"
         else:
+            verdict = None
             show_anomalies = True
 
         vis = self.display_image.copy()
@@ -2230,8 +2371,8 @@ class DocumentForgeryDetector:
 
         ax2 = fig.add_subplot(1, 2, 2)
         ax2.imshow(vis_rgb)
-        title_text = "Detected OCR/NER and anomaly regions"
-        title_color = (0, 100, 0)
+        title_text = f"Verdict: {verdict.title()}" if verdict else "Detected OCR/NER and anomaly regions"
+        title_color = (140, 0, 0) if verdict == "FORGED" else (0, 100, 0)
         ax2.set_title(
             title_text,
             fontsize=14,
