@@ -1570,6 +1570,7 @@ class DocumentForgeryDetector:
             "detected_core_count": len(detected_core),
             "core_expected_count": len(core_fields),
             "field_recall": len(detected_core) / len(core_fields),
+            "ner_recall": len(detected_core) / len(core_fields),
         }
 
         # ADD PRECISION + F1 FOR FIELD EXTRACTION
@@ -1859,23 +1860,23 @@ class DocumentForgeryDetector:
         json_name = os.path.splitext(image_name)[0] + ".json"
         return os.path.join(json_dir, json_name)
 
-    def _field_json_output_path(self, image_path):
-        """Build field JSON path for LLM/regex extracted entities."""
-        json_dir = os.path.join("final_results\\results", "FIELD_JSON_results")
+    def _ner_json_output_path(self, image_path):
+        """Build NER JSON path for rule-based extracted entities."""
+        json_dir = os.path.join("final_results\\results", "NER_JSON_results")
         image_name = os.path.basename(image_path)
         json_name = os.path.splitext(image_name)[0] + ".json"
         return os.path.join(json_dir, json_name)
 
-    def save_field_json(self, image_path):
-        """Save extracted field entities to dedicated JSON output folder."""
-        field_json_path = self._field_json_output_path(image_path)
-        os.makedirs(os.path.dirname(field_json_path), exist_ok=True)
+    def save_ner_json(self, image_path):
+        """Save extracted NER entities to the NER JSON output folder."""
+        ner_json_path = self._ner_json_output_path(image_path)
+        os.makedirs(os.path.dirname(ner_json_path), exist_ok=True)
 
         data = {
             "image_name": os.path.basename(image_path),
             "image_size": [self.width, self.height],
-            "field_source": "RULE_BASED_REGEX",
-            "field_entities": [
+            "ner_source": "RULE_BASED_REGEX",
+            "ner_entities": [
                 {
                     "field": field,
                     "text": payload.get("text", ""),
@@ -1884,15 +1885,23 @@ class DocumentForgeryDetector:
                 }
                 for field, payload in sorted(self.field_entities.items())
             ],
-            "field_metrics": getattr(self, "field_metrics", {}),
+            "ner_metrics": getattr(self, "field_metrics", {}),
         }
 
-        with open(field_json_path, "w", encoding="utf-8") as f:
+        with open(ner_json_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4, ensure_ascii=False)
 
-        print(f"[INFO] FIELD JSON saved → {field_json_path}")
-        self.log.append(f"- FIELD JSON saved: {field_json_path}")
-        return field_json_path
+        print(f"[INFO] NER JSON saved → {ner_json_path}")
+        self.log.append(f"- NER JSON saved: {ner_json_path}")
+        return ner_json_path
+
+    def _field_json_output_path(self, image_path):
+        """Backward-compatible alias for older callers."""
+        return self._ner_json_output_path(image_path)
+
+    def save_field_json(self, image_path):
+        """Backward-compatible alias for older callers; writes NER JSON."""
+        return self.save_ner_json(image_path)
 
     def _ordered_display_fields(self):
         """Return the complete, stable list of fields shown in terminal output."""
@@ -1930,9 +1939,9 @@ class DocumentForgeryDetector:
                 return text
         return ""
 
-    def print_field_fields_summary(self):
-        """Print all supported field names and their current extracted values."""
-        print("\n[FIELD VALUES]")
+    def print_ner_entities_summary(self):
+        """Print NER entity names and values matching the NER JSON output."""
+        print("\n[NER VALUES]")
         for field in self._ordered_display_fields():
             value = self._field_value_from_aliases(field)
             print(f"  {field:18s}: {value if value else 'N/A'}")
@@ -1940,8 +1949,12 @@ class DocumentForgeryDetector:
         print(f"\n[⚠️ RISK SCORE]: {int(self.risk_score)}")
         print(f"[⚠️ ISSUES]: {self.risk_issues}")
         if self.missing_field_fields:
-            print("  Missing fields:", ", ".join(self.missing_field_fields))
-            print(f"  Field Recall: {self.field_metrics.get('field_recall', 0.0):.2f}")
+            print("  Missing NER fields:", ", ".join(self.missing_field_fields))
+            print(f"  NER Recall: {self.field_metrics.get('ner_recall', self.field_metrics.get('field_recall', 0.0)):.2f}")
+
+    def print_field_fields_summary(self):
+        """Backward-compatible alias for older callers; prints NER values."""
+        self.print_ner_entities_summary()
 
     def perform_ocr(self):
         """Initializes and executes the PaddleOCR engine to retrieve raw text and spatial data."""
@@ -2313,9 +2326,9 @@ class DocumentForgeryDetector:
             self.detect_anomalies(sensitivity=char_sensitivity)
             self.cluster_anomalous_regions()
             
-            # 5. Persist Field outputs/features
-            self.save_field_json(self.image_path)
-            self.print_field_fields_summary()
+            # 5. Persist NER outputs/features
+            self.save_ner_json(self.image_path)
+            self.print_ner_entities_summary()
             self.generate_training_features()
             self.generate_report() # This pre-calculates the verdict
 
