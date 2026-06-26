@@ -18,7 +18,7 @@ This repository implements an AI-assisted identity-document authentication pipel
 - **Leakage-aware supervised ML** using a scikit-learn Random Forest pipeline for binary classification of documents as authentic or forged.
 - **Explainability outputs** including JSON OCR/field exports, feature vectors, risk scores, terminal reports, and annotated PNG visualizations.
 
-The implementation is currently focused on documents from **Albania (ALB)**, **Latvia (LVA)**, and **Slovakia (SVK)**.
+The implementation is currently focused on documents from **Albania (ALB)**, **Latvia (LVA)**, and **Slovakia (SVK)**. The experiments were conducted using the public MIDV-2020 identity document dataset, which provides high-quality passport and identity card images for document analysis and authentication research.
 
 ---
 
@@ -186,7 +186,7 @@ Evaluation metrics written to `trained_models/training_metrics.json` include:
 A minimal Python environment should include the libraries imported by the codebase:
 
 ```bash
-pip install opencv-python numpy matplotlib pillow pandas scikit-learn paddleocr
+pip install opencv-python numpy matplotlib pillow pandas scikit-learn paddleocr paddlepaddle
 ```
 
 Notes:
@@ -196,6 +196,54 @@ Notes:
 - If your PaddleOCR installation requires PaddlePaddle separately, install the CPU or GPU PaddlePaddle package recommended for your platform before running the pipeline.
 
 ---
+### 7.1 Public Dataset (MIDV-2020)
+This project uses the MIDV-2020 (Mobile Identity Document Video Dataset), a publicly available benchmark dataset for identity-document analysis.
+
+Dataset Source
+The dataset can be downloaded from the official repository:
+
+GitHub: https://github.com/fcakyon/midv-2020
+
+The repository contains the complete dataset, documentation, annotations, and licensing information.
+
+Download Instructions
+1. Visit the MIDV-2020 GitHub repository.
+2. Follow the instructions provided by the repository to download the dataset.
+3. Extract the downloaded dataset to your local machine.
+   
+Dataset Preparation
+After downloading, organize the images into the following directory structure expected by this project:
+```bash
+datasets/
+    training_set/
+        *.jpg / *.jpeg / *.png
+    validation_set/
+        *.jpg / *.jpeg / *.png
+    testing_set/
+        *.jpg / *.jpeg / *.png
+```
+
+This project was evaluated using passport and identity-document images from the following supported countries:
+- Albania (ALB)
+- Latvia (LVA)
+- Slovakia (SVK)
+
+If additional preprocessing or dataset partitioning is required, prepare the images according to the training, validation, and testing folders shown above.
+
+Label Convention
+The dataset builder automatically assigns labels based on the image filename:
+- Filename containing 'fake' or 'forged' → FORGED (Label = 1)
+- Otherwise → AUTHENTIC (Label = 0)
+
+Example:
+```bash
+alb_id_01_fake.jpg      → FORGED
+lva_passport_real.jpg   → AUTHENTIC
+svk_id_forged.png       → FORGED
+```
+
+Dataset Citation
+If you use the MIDV-2020 dataset in research, please cite the original publication as recommended by the dataset authors.
 
 ## 8. Usage
 
