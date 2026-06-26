@@ -30,7 +30,6 @@ except ImportError:
 warnings.filterwarnings('ignore')
 
 
-# LLM NER removed — using rule-based regex only
 extract_passport_fields_llm = None
 
 COUNTRY_REQUIRED_FIELDS = {
@@ -61,8 +60,6 @@ class DocumentForgeryDetector:
         self.image_path = image_path
         self.ocr_engine = ocr_engine
         self.log = []
-        self.ground_truth_label = self.get_ground_truth_label()
-        self.log.append(f"- Ground Truth Label: {self.ground_truth_label}")
 
         if not os.path.exists(image_path):
             raise FileNotFoundError(f"Image file not found: {image_path}")
@@ -105,26 +102,14 @@ class DocumentForgeryDetector:
         self.ocr_results = None
         self.ocr_full_text = ""
         self.ocr_boxes = []
-        self.ner_entities = {}
+        self.field_entities = {}
         self.suspicious_regions = []
         self.final_verdict = "VERDICT NOT RUN"
         self.forgery_features = {}
         self.forgery_issues = []
         self.risk_score = 0.0
         self.risk_issues = []
-        self.llm_ner_disabled_reason = None
-
-    def get_ground_truth_label(self):
-        """
-        Determines ground truth label from filename.
-        If 'fake' in filename → FORGED
-        Else → AUTHENTIC
-        """
-        filename = os.path.basename(self.image_path).lower()
-
-        if "fake" in filename:
-            return "FORGED"
-        return "AUTHENTIC"
+        self.llm_field_disabled_reason = None
 
 
 
@@ -325,7 +310,7 @@ class DocumentForgeryDetector:
 
     def detect_anomalies(self, sensitivity=2.0):
         """
-        FORENSIC CHECK: Compares characters against statistical baselines and (if available) NER-standard constraints.
+        FORENSIC CHECK: Compares characters against statistical baselines and (if available) field-standard constraints.
         """
         if not self.baseline_stats:
             self.calculate_baseline_statistics()
@@ -481,24 +466,20 @@ class DocumentForgeryDetector:
         return self.suspicious_regions
 
     def _is_header_text(self, text):
-        text = str(text or "").upper().replace(" ", "")
+        """Return True only for document header text, not long NER values."""
+        normalized = unicodedata.normalize("NFKD", str(text or "").upper())
+        normalized = "".join(c for c in normalized if not unicodedata.combining(c))
+        normalized = re.sub(r"[^A-Z0-9]", "", normalized)
 
-        blacklist = [
+        header_markers = [
             "REPUBLIK",
             "REPUBLIC",
-            "SHQIP",
-            "ALBANIA",
             "LETERNJOFTIM",
             "PASSPORT",
-            "LATVIJ",
-            "SLOVENSK"
+            "SLOVENSKAREPUBLIKA",
         ]
 
-        # Reject long uppercase strings (very important)
-        if len(text) > 15:
-            return True
-
-        return any(word in text for word in blacklist)
+        return any(marker in normalized for marker in header_markers)
 
     def _validate_dates(self, entities):
         def _parse_date(value):
@@ -563,7 +544,7 @@ class DocumentForgeryDetector:
                 continue
             text_clean = box.get("text", "").strip()
 
-            # 🚫 REMOVE HEADER TEXT EARLY
+            # REMOVE HEADER TEXT EARLY
             if self._is_header_text(text_clean):
                 continue
 
@@ -576,9 +557,9 @@ class DocumentForgeryDetector:
 
         self.ocr_boxes = boxes
         if not boxes:
-            self.ner_entities = {}
-            self.ner_metrics = {}
-            self.missing_ner_fields = []
+            self.field_entities = {}
+            self.field_metrics = {}
+            self.missing_field_fields = []
             return
 
         filtered_boxes = []
@@ -590,9 +571,9 @@ class DocumentForgeryDetector:
         boxes = filtered_boxes
         self.ocr_boxes = boxes
         if not boxes:
-            self.ner_entities = {}
-            self.ner_metrics = {}
-            self.missing_ner_fields = []
+            self.field_entities = {}
+            self.field_metrics = {}
+            self.missing_field_fields = []
             return
 
         def y_mid(b): return (b[1] + b[3]) // 2
@@ -660,11 +641,11 @@ class DocumentForgeryDetector:
 
             entities[field] = box
 
-        # 🚀 COUNTRY-SPECIFIC EXTRACTION
+        # COUNTRY-SPECIFIC EXTRACTION
         for field in required_fields:
             candidate = self.match_field_by_label(field, boxes)
             if candidate:
-                # 🚨 Skip PLACE OF BIRTH for Slovakia
+                # Skip PLACE OF BIRTH for Slovakia
                 if country == "SLOVAKIA" and field == "PLACE OF BIRTH":
                     continue
                 entities[field] = candidate
@@ -706,7 +687,7 @@ class DocumentForgeryDetector:
                         used.add(j)
                         break
 
-        # 🚀 ADVANCED GIVEN NAME EXTRACTION (LAYOUT-AWARE)
+        # ADVANCED GIVEN NAME EXTRACTION (LAYOUT-AWARE)
         for i, box in enumerate(boxes):
             if "GIVEN" in box["norm"] or "EMRI" in box["norm"]:
                 best_candidate = None
@@ -719,15 +700,15 @@ class DocumentForgeryDetector:
                     if is_label_like(candidate["norm"]):
                         continue
 
-                    # 🚨 Explicit blacklist for label-like tokens
+                    # Explicit blacklist for label-like tokens
                     if any(x in candidate["norm"] for x in ["MBIEMRI", "EMRI", "NAME", "SURNAME"]):
                         continue
 
-                    # 🚨 Reject short/noisy tokens
+                    # Reject short/noisy tokens
                     if len(candidate["text"]) < 3:
                         continue
 
-                    # 🚨 HARD CONSTRAINT: candidate MUST be below label
+                    # HARD CONSTRAINT: candidate MUST be below label
                     dy = candidate["bbox"][1] - box["bbox"][3]
                     if dy < 0:
                         continue
@@ -736,7 +717,7 @@ class DocumentForgeryDetector:
                     if self._looks_like_name(candidate["text"]):
                         score += 5  # stronger boost
 
-                    # 🚀 NO STRICT VALIDATION HERE (important for recall)
+                    # NO STRICT VALIDATION HERE (important for recall)
                     if score > best_score:
                         best_score = score
                         best_candidate = candidate
@@ -744,7 +725,7 @@ class DocumentForgeryDetector:
                 if best_candidate and best_score >= 5:
                     entities["GIVEN NAME"] = best_candidate
 
-        # 🚀 FALLBACK RULES
+        # FALLBACK RULES
         for box in boxes:
             text = box["text"].strip().upper()
 
@@ -854,7 +835,7 @@ class DocumentForgeryDetector:
         if len(mrz_lines) >= 2:
             mrz_data = self.mrz_parse_(mrz_lines)
 
-            # 🚀 MRZ IS GROUND TRUTH
+            # MRZ IS GROUND TRUTH
             for field, value in mrz_data.items():
                 if value:
                     entities[field] = {
@@ -868,7 +849,7 @@ class DocumentForgeryDetector:
                 self.log.append("- Country detected: LATVIA (optional HEIGHT expected if present).")
 
         if self._is_passport(boxes):
-            # 🚫 If passport detected, disable PERSONAL NO from OCR
+            # If passport detected, disable PERSONAL NO from OCR
             if "PERSONAL NO" in entities:
                 del entities["PERSONAL NO"]
 
@@ -897,19 +878,19 @@ class DocumentForgeryDetector:
                     dy_center = ((cy1 + cy2) / 2) - label_bottom
                     dx = abs(cx1 - box["bbox"][0])
 
-                    # 🚨 STRICT: must be clearly BELOW label (not overlapping)
+                    # STRICT: must be clearly BELOW label (not overlapping)
                     if dy_top < 10:
                         continue
 
-                    # 🚨 must not be too far
+                    # must not be too far
                     if dy_top > 150:
                         continue
 
-                    # 🚨 horizontal alignment
+                    # horizontal alignment
                     if dx > 200:
                         continue
 
-                    # 🚨 reject label-like words HARD
+                    # reject label-like words HARD
                     text_norm = candidate["norm"]
 
                     if is_label_like(text_norm):
@@ -918,11 +899,11 @@ class DocumentForgeryDetector:
                     if any(x in text_norm for x in ["MBIEMRI", "EMRI", "NAME", "SURNAME"]):
                         continue
 
-                    # 🚨 reject if same vertical band (this kills your bug)
+                    # reject if same vertical band (this kills your bug)
                     if abs(cy1 - label_top) < 20:
                         continue
 
-                    # 🚨 valid name check
+                    # valid name check
                     if not re.fullmatch(r"[A-Za-z]{3,}", candidate["text"]):
                         continue
 
@@ -961,7 +942,7 @@ class DocumentForgeryDetector:
                 if "SURNAME" in entities:
                     break
 
-        # 🚀 GIVEN NAME DERIVATION FROM SAME LINE
+        # GIVEN NAME DERIVATION FROM SAME LINE
         if "SURNAME" in entities and "GIVEN NAME" not in entities:
             surname = entities["SURNAME"]["text"]
 
@@ -1027,7 +1008,7 @@ class DocumentForgeryDetector:
                 if "," in box["text"] and not any(char.isdigit() for char in box["text"]):
                     assign_if_valid("PLACE OF BIRTH", box)
 
-        # 🚀 DERIVE NATIONALITY FROM PLACE OF BIRTH
+        # DERIVE NATIONALITY FROM PLACE OF BIRTH
         if country != "SLOVAKIA":
             if "NATIONALITY" not in entities and "PLACE OF BIRTH" in entities:
                 pob_text = entities["PLACE OF BIRTH"]["text"].upper()
@@ -1162,7 +1143,7 @@ class DocumentForgeryDetector:
 
         self._validate_dates(entities)
 
-        # 🚫 PREVENT GIVEN NAME = SURNAME
+        # PREVENT GIVEN NAME = SURNAME
         if "GIVEN NAME" in entities and "SURNAME" in entities:
             if entities["GIVEN NAME"]["text"] == entities["SURNAME"]["text"]:
                 # Keep SURNAME, remove GIVEN NAME
@@ -1203,7 +1184,7 @@ class DocumentForgeryDetector:
             if best_candidate:
                 entities["GIVEN NAME"] = best_candidate
 
-        # 🚀 FALLBACK GIVEN NAME FROM NEARBY TEXT
+        # FALLBACK GIVEN NAME FROM NEARBY TEXT
         if "SURNAME" in entities and "GIVEN NAME" not in entities:
             surname_box = entities["SURNAME"]["bbox"]
 
@@ -1253,12 +1234,12 @@ class DocumentForgeryDetector:
             if best_candidate:
                 entities["PERSONAL NO"] = best_candidate
 
-        # 🚫 FINAL CLEANUP PASS
+        # FINAL CLEANUP PASS
         for field, data in list(entities.items()):
             if self._is_header_text(data["text"]):
                 del entities[field]
 
-        # 🚫 REMOVE SIGNATURE LEAKS
+        # REMOVE SIGNATURE LEAKS
         for field, data in list(entities.items()):
             text = data["text"].upper()
             if "SIGNATURE" in text or "FIRMA" in text:
@@ -1292,7 +1273,7 @@ class DocumentForgeryDetector:
                     "confidence": 0.99
                 }
 
-        # 🚨 FINAL FAILSAFE
+        # FINAL FAILSAFE
         if "NATIONALITY" not in entities or not entities["NATIONALITY"]["text"].strip():
             fallback_nationality = country if country and country != "UNKNOWN" else "UNSPECIFIED"
             entities["NATIONALITY"] = {
@@ -1306,7 +1287,7 @@ class DocumentForgeryDetector:
             entities = {k: v for k, v in entities.items() if k in allowed}
 
         # Finalize structured Named Entity Recognition (NER) output
-        self.ner_entities = {
+        self.field_entities = {
             k: {
                 "text": v["text"],
                 "bbox": v["bbox"],
@@ -1318,32 +1299,137 @@ class DocumentForgeryDetector:
         ocr_text_lines = [box["text"] for box in boxes if box.get("text")]
         country = self.detect_country(self.ocr_full_text)
 
-        self.ner_entities = calibrate_entities(
-            self.ner_entities,
+        self.field_entities = calibrate_entities(
+            self.field_entities,
             country=country,
             raw_lines=ocr_text_lines
         )
 
-        self.ner_entities = derive_nationality(self.ner_entities)
-        if "NATIONALITY" not in self.ner_entities or not self.ner_entities["NATIONALITY"].get("text", "").strip() or self.ner_entities["NATIONALITY"].get("text", "").strip().upper() == "UNKNOWN":
+        self.field_entities = derive_nationality(self.field_entities)
+        self.recover_missing_fields_from_ocr()
+        if "NATIONALITY" not in self.field_entities or not self.field_entities["NATIONALITY"].get("text", "").strip() or self.field_entities["NATIONALITY"].get("text", "").strip().upper() == "UNKNOWN":
             fallback_nationality = country if country and country != "UNKNOWN" else "UNSPECIFIED"
-            self.ner_entities["NATIONALITY"] = {
+            self.field_entities["NATIONALITY"] = {
                 "text": fallback_nationality,
                 "bbox": (0, 0, 0, 0),
                 "confidence": 0.99
             }
 
         self.risk_score, self.risk_issues = compute_risk_score(
-            self.ner_entities,
+            self.field_entities,
             country=country
         )
-        self.ner_source = "REGEX"
+        self.field_source = "REGEX"
 
         # Calculate Recall Metrics: Evaluate extraction completeness for forensic reporting.
-        self._update_ner_metrics()
+        self._update_field_metrics()
 
         if print_summary:
-            self.print_ner_fields_summary()
+            self.print_field_fields_summary()
+
+    def recover_missing_fields_from_ocr(self):
+        """Best-effort recovery for field values when label-based extraction is sparse."""
+        if not getattr(self, "ocr_boxes", None):
+            return
+
+        def put(field, box, confidence=0.75):
+            if self.field_entities.get(field, {}).get("text"):
+                return
+            self.field_entities[field] = {
+                "text": str(box.get("text", "")).strip(),
+                "bbox": box.get("bbox", (0, 0, 0, 0)),
+                "confidence": float(box.get("confidence", confidence) or confidence),
+            }
+
+        boxes = sorted(self.ocr_boxes, key=lambda b: (b.get("bbox", (0, 0, 0, 0))[1], b.get("bbox", (0, 0, 0, 0))[0]))
+        text_boxes = [b for b in boxes if str(b.get("text", "")).strip()]
+        if not text_boxes:
+            return
+
+        country = self.detect_country(getattr(self, "ocr_full_text", ""))
+        if country == "ALBANIA" and not self.field_entities.get("NATIONALITY", {}).get("text"):
+            self.field_entities["NATIONALITY"] = {"text": "ALBANIAN", "bbox": (0, 0, 0, 0), "confidence": 0.99}
+
+        # Pattern-based values that do not require a nearby label.
+        date_boxes = []
+        for box in text_boxes:
+            text = str(box.get("text", "")).strip()
+            upper = text.upper()
+            cleaned = re.sub(r"[^A-Z0-9]", "", upper)
+
+            if re.fullmatch(r"\d{6,10}", cleaned):
+                put("ID CARD NO", box)
+            elif re.fullmatch(r"[A-Z]\d{7,9}[A-Z]", cleaned):
+                put("PERSONAL NO", box)
+            elif upper in {"M", "F"}:
+                put("SEX", box)
+            elif re.fullmatch(r"[A-Z]{2,5}", upper) and upper not in {"ALB", "LVA", "SVK"}:
+                put("AUTHORITY", box, confidence=0.65)
+
+            parsed_date = self._parse_date_from_text(text)
+            if parsed_date:
+                date_boxes.append((parsed_date, box))
+
+            if country != "SLOVAKIA" and "," in text and not re.search(r"\d", text):
+                put("PLACE OF BIRTH", box)
+
+        if len(date_boxes) >= 3:
+            for field, (_, box) in zip(
+                ["DATE OF BIRTH", "DATE OF ISSUE", "DATE OF EXPIRY"],
+                sorted(date_boxes, key=lambda item: item[0]),
+            ):
+                put(field, box)
+
+        # Label-neighbor recovery for names and any values that OCR kept near labels.
+        label_to_field = {
+            "SURNAME": "SURNAME",
+            "MBIEM": "SURNAME",
+            "GIVEN": "GIVEN NAME",
+            "EMRI": "GIVEN NAME",
+            "NATIONAL": "NATIONALITY",
+            "SHTET": "NATIONALITY",
+            "BIRTH": "DATE OF BIRTH",
+            "LIND": "DATE OF BIRTH",
+            "ISSUE": "DATE OF ISSUE",
+            "LESH": "DATE OF ISSUE",
+            "EXPIR": "DATE OF EXPIRY",
+            "SKAD": "DATE OF EXPIRY",
+            "AUTHORITY": "AUTHORITY",
+            "AUTOR": "AUTHORITY",
+        }
+
+        for label_box in text_boxes:
+            label_text = str(label_box.get("text", "")).upper()
+            target_field = next((field for token, field in label_to_field.items() if token in label_text), None)
+            if not target_field or self.field_entities.get(target_field, {}).get("text"):
+                continue
+
+            lx1, ly1, lx2, ly2 = label_box.get("bbox", (0, 0, 0, 0))
+            best = None
+            best_score = -1
+            for candidate in text_boxes:
+                if candidate is label_box:
+                    continue
+                candidate_text = str(candidate.get("text", "")).strip()
+                if not candidate_text or self._is_header_text(candidate_text):
+                    continue
+                if any(token in candidate_text.upper() for token in label_to_field):
+                    continue
+
+                cx1, cy1, cx2, cy2 = candidate.get("bbox", (0, 0, 0, 0))
+                dy = cy1 - ly2
+                dx = abs(cx1 - lx1)
+                if not (0 <= dy <= 120 and dx <= 260):
+                    continue
+                if not self._is_valid_for_field(target_field, candidate_text):
+                    continue
+                score = (120 - dy) + (260 - dx)
+                if score > best_score:
+                    best = candidate
+                    best_score = score
+
+            if best:
+                put(target_field, best)
 
     def parse_mrz_dates(self, mrz_lines):
         try:
@@ -1440,8 +1526,8 @@ class DocumentForgeryDetector:
         except Exception:
             return date_str
 
-    def _update_ner_metrics(self):
-        """Recompute NER completeness metrics from current ner_entities."""
+    def _update_field_metrics(self):
+        """Recompute field completeness metrics from current field_entities."""
         core_fields = {
             'SURNAME',
             'GIVEN NAME',
@@ -1464,7 +1550,7 @@ class DocumentForgeryDetector:
             'MRZ LINE 2',
         }
 
-        detected = set(self.ner_entities.keys())
+        detected = set(self.field_entities.keys())
         normalized_detected = set(detected)
         if {'ID CARD NO', 'PASSPORT NO'} & detected:
             normalized_detected.add('DOCUMENT NO')
@@ -1473,15 +1559,29 @@ class DocumentForgeryDetector:
         missing_core = core_fields - detected_core
         detected_optional = sorted(optional_fields & normalized_detected)
 
-        self.ner_metrics = {
+        self.field_metrics = {
             "detected_fields": sorted(detected),
             "detected_optional_fields": detected_optional,
             "missing_core_fields": sorted(missing_core),
             "detected_core_count": len(detected_core),
             "core_expected_count": len(core_fields),
+            "field_recall": len(detected_core) / len(core_fields),
             "ner_recall": len(detected_core) / len(core_fields),
         }
-        self.missing_ner_fields = sorted(missing_core)
+
+        # ADD PRECISION + F1 FOR FIELD EXTRACTION
+        detected_total = len(normalized_detected)
+        expected_total = len(core_fields)
+
+        precision = detected_total / (detected_total + len(missing_core) + 1e-6)
+        recall = len(detected_core) / (expected_total + 1e-6)
+        f1 = 2 * (precision * recall) / (precision + recall + 1e-6)
+
+        self.field_metrics.update({
+            "precision": precision,
+            "f1_score": f1,
+        })
+        self.missing_field_fields = sorted(missing_core)
 
     def detect_country(self, ocr_text):
         """Infer document country hints from OCR text."""
@@ -1757,14 +1857,14 @@ class DocumentForgeryDetector:
         return os.path.join(json_dir, json_name)
 
     def _ner_json_output_path(self, image_path):
-        """Build NER JSON path for LLM/regex extracted entities."""
+        """Build NER JSON path for rule-based extracted entities."""
         json_dir = os.path.join("final_results\\results", "NER_JSON_results")
         image_name = os.path.basename(image_path)
         json_name = os.path.splitext(image_name)[0] + ".json"
         return os.path.join(json_dir, json_name)
 
     def save_ner_json(self, image_path):
-        """Save extracted NER entities to dedicated JSON output folder."""
+        """Save extracted NER entities to the NER JSON output folder."""
         ner_json_path = self._ner_json_output_path(image_path)
         os.makedirs(os.path.dirname(ner_json_path), exist_ok=True)
 
@@ -1779,9 +1879,9 @@ class DocumentForgeryDetector:
                     "bbox": list(payload.get("bbox", [])) if payload.get("bbox") else None,
                     "confidence": float(payload.get("confidence", 0.0)),
                 }
-                for field, payload in sorted(self.ner_entities.items())
+                for field, payload in sorted(self.field_entities.items())
             ],
-            "ner_metrics": getattr(self, "ner_metrics", {}),
+            "ner_metrics": getattr(self, "field_metrics", {}),
         }
 
         with open(ner_json_path, "w", encoding="utf-8") as f:
@@ -1791,19 +1891,66 @@ class DocumentForgeryDetector:
         self.log.append(f"- NER JSON saved: {ner_json_path}")
         return ner_json_path
 
-    def print_ner_fields_summary(self):
-        """Print current NER entity summary to terminal."""
-        print("\n[NER FIELDS]")
-        for k in sorted(self.ner_entities):
-            print(f"  {k:18s}: {self.ner_entities[k]['text']}")
-        print("\n[CALIBRATED NER FIELDS]")
-        for k in sorted(self.ner_entities):
-            print(f"  {k:18s}: {self.ner_entities[k]['text']}")
+    def _field_json_output_path(self, image_path):
+        """Backward-compatible alias for older callers."""
+        return self._ner_json_output_path(image_path)
+
+    def save_field_json(self, image_path):
+        """Backward-compatible alias for older callers; writes NER JSON."""
+        return self.save_ner_json(image_path)
+
+    def _ordered_display_fields(self):
+        """Return the complete, stable list of fields shown in terminal output."""
+        preferred_order = [
+            "SURNAME", "GIVEN NAME", "FULL NAME", "NATIONALITY",
+            "PASSPORT NO", "ID CARD NO", "PERSONAL NO", "PLACE OF BIRTH",
+            "DATE OF BIRTH", "SEX", "HEIGHT", "DATE OF ISSUE",
+            "DATE OF EXPIRY", "AUTHORITY", "SIGNATURE", "MRZ LINE 1",
+            "MRZ LINE 2",
+        ]
+        extra_fields = sorted(
+            field for field in self.field_entities if field not in preferred_order
+        )
+        return preferred_order + extra_fields
+
+    def _entity_text(self, field):
+        """Return printable text for a field entity, regardless of payload shape."""
+        value = self.field_entities.get(field, {})
+        if isinstance(value, dict):
+            return str(value.get("text", "") or "").strip()
+        return str(value or "").strip()
+
+    def _field_value_from_aliases(self, field):
+        """Return field text while tolerating common field-name variants."""
+        aliases = {
+            "SURNAME": ["SURNAME", "LAST NAME", "FAMILY NAME"],
+            "GIVEN NAME": ["GIVEN NAME", "FIRST NAME", "NAME"],
+            "PASSPORT NO": ["PASSPORT NO", "PASSPORT NUMBER", "DOCUMENT NO"],
+            "ID CARD NO": ["ID CARD NO", "CARD NO", "DOCUMENT NO"],
+            "PERSONAL NO": ["PERSONAL NO", "PERSONAL NUMBER", "PERSONAL ID"],
+        }
+        for key in aliases.get(field, [field]):
+            text = self._entity_text(key)
+            if text:
+                return text
+        return ""
+
+    def print_ner_entities_summary(self):
+        """Print NER entity names and values matching the NER JSON output."""
+        print("\n[NER VALUES]")
+        for field in self._ordered_display_fields():
+            value = self._field_value_from_aliases(field)
+            print(f"  {field:18s}: {value if value else 'N/A'}")
+
         print(f"\n[⚠️ RISK SCORE]: {int(self.risk_score)}")
         print(f"[⚠️ ISSUES]: {self.risk_issues}")
-        if self.missing_ner_fields:
-            print("  Missing fields:", ", ".join(self.missing_ner_fields))
-            print(f"  NER Recall: {self.ner_metrics.get('ner_recall', 0.0):.2f}")
+        if self.missing_field_fields:
+            print("  Missing NER fields:", ", ".join(self.missing_field_fields))
+            print(f"  NER Recall: {self.field_metrics.get('ner_recall', self.field_metrics.get('field_recall', 0.0)):.2f}")
+
+    def print_field_fields_summary(self):
+        """Backward-compatible alias for older callers; prints NER values."""
+        self.print_ner_entities_summary()
 
     def perform_ocr(self):
         """Initializes and executes the PaddleOCR engine to retrieve raw text and spatial data."""
@@ -1813,7 +1960,7 @@ class DocumentForgeryDetector:
             if not PaddleOCR:
                 self.ocr_full_text = "OCR NOT AVAILABLE"
                 return
-            self.ocr_engine = PaddleOCR(use_angle_cls=True, lang='en', use_gpu=False, show_log=False)
+            self.ocr_engine = PaddleOCR(use_angle_cls=True, lang='en')
 
         all_boxes = []
         variants = self._generate_ocr_variants()
@@ -1947,9 +2094,9 @@ class DocumentForgeryDetector:
     def evaluate_logical_consistency(self):
         """Check date ordering rules and store critical logical issues."""
         self.forgery_issues = []
-        dob_raw = self.ner_entities.get("DATE OF BIRTH", {}).get("text", "")
-        doi_raw = self.ner_entities.get("DATE OF ISSUE", {}).get("text", "")
-        doe_raw = self.ner_entities.get("DATE OF EXPIRY", {}).get("text", "")
+        dob_raw = self.field_entities.get("DATE OF BIRTH", {}).get("text", "")
+        doi_raw = self.field_entities.get("DATE OF ISSUE", {}).get("text", "")
+        doe_raw = self.field_entities.get("DATE OF EXPIRY", {}).get("text", "")
 
         dob = self._parse_date_from_text(dob_raw)
         doi = self._parse_date_from_text(doi_raw)
@@ -1993,7 +2140,7 @@ class DocumentForgeryDetector:
         ocr_confidence_mean = float(np.mean([b.get('confidence', 0.0) for b in self.ocr_boxes])) if self.ocr_boxes else 0.0
 
         field_blur_values = []
-        for entity in self.ner_entities.values():
+        for entity in self.field_entities.values():
             bbox = entity.get('bbox')
             if not bbox or len(bbox) != 4:
                 continue
@@ -2023,10 +2170,10 @@ class DocumentForgeryDetector:
         # Feature Vector Assembly 
         self.forgery_features = {
             'Char_Count': total_chars,
-            'NER_Detected_Count': self.ner_metrics.get('detected_count', 0)
-                if hasattr(self, 'ner_metrics') else 0,
-            'NER_Completeness_Ratio': self.ner_metrics.get('ner_recall', 0.0)
-                if hasattr(self, 'ner_metrics') else 0.0,
+            'Field_Detected_Count': self.field_metrics.get('detected_count', 0)
+                if hasattr(self, 'field_metrics') else 0,
+            'Field_Completeness_Ratio': self.field_metrics.get('field_recall', 0.0)
+                if hasattr(self, 'field_metrics') else 0.0,
             'H_Mean': stats.get('height_mean', 0), 'H_STD': stats.get('height_std', 0),
             'W_Mean': stats.get('width_mean', 0), 'W_STD': stats.get('width_std', 0),
             'AR_Mean': stats.get('aspect_ratio_mean', 0), 'AR_STD': stats.get('aspect_ratio_std', 0),
@@ -2051,6 +2198,101 @@ class DocumentForgeryDetector:
         self.log.append(f"- Feature vector generated with {len(self.forgery_features)} metrics.")
         return self.forgery_features
     
+    def generate_feature_vector(self):
+
+        stats = self.baseline_stats or {}
+
+        total_chars = len(self.characters)
+
+        geo_anomalies = len([
+            a for a in self.anomalies
+            if "GLOBAL_HEIGHT_OUTLIER" in a.get("types", [])
+        ])
+
+        ink_anomalies = len([
+            a for a in self.anomalies
+            if "INK_INTENSITY_ANOMALY" in a.get("types", [])
+        ])
+
+        font_size_variance = stats.get("height_std", 0)
+
+        ocr_confidence_mean = np.mean([
+            b.get("confidence", 0)
+            for b in self.ocr_boxes
+        ]) if self.ocr_boxes else 0
+
+        field_blur_variance = cv2.Laplacian(
+            self.gray_original,
+            cv2.CV_64F
+        ).var()
+
+        self.forgery_features = {
+
+            'Char_Count': total_chars,
+
+            'Field_Detected_Count':
+                self.field_metrics.get('detected_core_count', 0)
+                if hasattr(self, 'field_metrics') else 0,
+
+            'Field_Completeness_Ratio':
+                self.field_metrics.get('field_recall', 0.0)
+                if hasattr(self, 'field_metrics') else 0.0,
+
+            'H_Mean': stats.get('height_mean', 0),
+            'H_STD': stats.get('height_std', 0),
+
+            'W_Mean': stats.get('width_mean', 0),
+            'W_STD': stats.get('width_std', 0),
+
+            'AR_Mean': stats.get('aspect_ratio_mean', 0),
+            'AR_STD': stats.get('aspect_ratio_std', 0),
+
+            'Ink_Mean': stats.get('ink_mean', 0),
+            'Ink_STD': stats.get('ink_std', 0),
+
+            'Grad_Mean': stats.get('grad_mean', 0),
+            'Grad_STD': stats.get('grad_std', 0),
+
+            'Ink_Density_Mean':
+                stats.get('density_mean', 0),
+
+            'Geo_Anomaly_Ratio':
+                geo_anomalies / (total_chars + 1e-6),
+
+            'Ink_Anomaly_Ratio':
+                ink_anomalies / (total_chars + 1e-6),
+
+            'BG_Mean':
+                self.background_stats.get('mean', 0)
+                if self.background_stats else 0,
+
+            'BG_STD':
+                self.background_stats.get('std', 0)
+                if self.background_stats else 0,
+
+            'OCR_Box_Anomalies_Count':
+                len(self.ocr_box_anomalies),
+
+            'BG_Anomaly_Line_Count':
+                len(self.background_anomalies),
+
+            'Clustered_Regions_Count':
+                len(self.suspicious_regions),
+
+            'Font_Size_Variance':
+                font_size_variance,
+
+            'OCR_Confidence_Mean':
+                ocr_confidence_mean,
+
+            'Field_Blur_Variance':
+                field_blur_variance,
+
+            'Risk_Score':
+                self.risk_score,
+        }
+
+        return self.forgery_features
 
     def process_document(self, char_sensitivity=2.0, bg_sensitivity=3.0, ocr_sensitivity=2.5, auto_save_png=True):
         """Orchestrates the full detection pipeline with mandatory sequence."""
@@ -2062,7 +2304,7 @@ class DocumentForgeryDetector:
             # 2. Identify Fields and Values using rule-based regex NER
             self.identify_critical_entities_from_ocr(print_summary=False)
             country = self.detect_country(self.ocr_full_text)
-            validation_issues = self.validate_fields(country, self.ner_entities)
+            validation_issues = self.validate_fields(country, self.field_entities)
             if validation_issues:
                 self.forgery_issues.extend(validation_issues)
             self.save_ocr_json(self.image_path)
@@ -2082,7 +2324,7 @@ class DocumentForgeryDetector:
             
             # 5. Persist NER outputs/features
             self.save_ner_json(self.image_path)
-            self.print_ner_fields_summary()
+            self.print_ner_entities_summary()
             self.generate_training_features()
             self.generate_report() # This pre-calculates the verdict
 
@@ -2094,23 +2336,15 @@ class DocumentForgeryDetector:
             self.log.append(f"[FATAL PIPELINE ERROR] {e}")
             raise
     def visualize_results(self, save_path=None):
-        """
-        Visualization logic is synchronized with:
-        - ML verdict during inference
-        - Ground truth during training dataset generation
-        """
+        """Render OCR/NER overlays and anomaly regions without ground-truth coupling."""
 
         # Case 1: ML-based inference
         if hasattr(self, "ml_verdict"):
             verdict = self.ml_verdict
             show_anomalies = verdict == "FORGED"
-        # Case 2: Training dataset visualization
-        elif hasattr(self, "is_training_doc"):
-            verdict = "FORGED" if self.is_forged_gt else "AUTHENTIC"
-            show_anomalies = self.is_forged_gt
         else:
-            verdict = "AUTHENTIC"
-            show_anomalies = False
+            verdict = None
+            show_anomalies = True
 
         vis = self.display_image.copy()
 
@@ -2119,15 +2353,15 @@ class DocumentForgeryDetector:
             x1, y1, x2, y2 = box['bbox']
             cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 255), 2)
 
-        # 2. NER Fields (Green)
-        for field, data in self.ner_entities.items():
+        # 2. Field Entities (Green)
+        for field, data in self.field_entities.items():
             bbox = data.get("bbox")
             if not bbox or len(bbox) != 4:
                 continue
             x1, y1, x2, y2 = bbox
             cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-        # 3. High-severity anomalies (Red) — ONLY WHEN FORGED
+        # 3. High-severity anomalies (Red)
         if show_anomalies:
             for a in self.anomalies:
                 if a.get("severity") == "high" and "char" in a:
@@ -2146,8 +2380,8 @@ class DocumentForgeryDetector:
 
         ax2 = fig.add_subplot(1, 2, 2)
         ax2.imshow(vis_rgb)
-        title_text = f"Ground Truth: {self.ground_truth_label}"
-        title_color = (0, 100, 0)
+        title_text = f"Verdict: {verdict.title()}" if verdict else "Detected OCR/NER and anomaly regions"
+        title_color = (140, 0, 0) if verdict == "FORGED" else (0, 100, 0)
         ax2.set_title(
             title_text,
             fontsize=14,
@@ -2159,6 +2393,8 @@ class DocumentForgeryDetector:
         fig.tight_layout()
 
         if save_path:
+            # 🚀 Ensure directory exists before saving
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
             fig.savefig(save_path, dpi=200, bbox_inches="tight")
 
         plt.close(fig)
@@ -2175,12 +2411,12 @@ class DocumentForgeryDetector:
         report.append("-" * 80)
         report.append("Execution Log:"); report.extend([f"  {line}" for line in self.log]); report.append("-" * 80)
 
-        # Named Entities (Omitted for brevity, assumed included)
-        report.append("Named Entities (scoped fields):")
-        ner_keys_order = ['SURNAME', 'GIVEN NAME', 'FULL NAME', 'NATIONALITY', 'PASSPORT NO', 'ID CARD NO', 'PERSONAL NO', 'PLACE OF BIRTH', 'DATE OF BIRTH', 'SEX', 'HEIGHT', 'DATE OF ISSUE', 'DATE OF EXPIRY', 'AUTHORITY', 'SIGNATURE', 'MRZ LINE 1', 'MRZ LINE 2']
-        detected_keys = [k for k in ner_keys_order if k in self.ner_entities]
+        # Field Entities (Omitted for brevity, assumed included)
+        report.append("Field Entities (scoped fields):")
+        field_keys_order = ['SURNAME', 'GIVEN NAME', 'FULL NAME', 'NATIONALITY', 'PASSPORT NO', 'ID CARD NO', 'PERSONAL NO', 'PLACE OF BIRTH', 'DATE OF BIRTH', 'SEX', 'HEIGHT', 'DATE OF ISSUE', 'DATE OF EXPIRY', 'AUTHORITY', 'SIGNATURE', 'MRZ LINE 1', 'MRZ LINE 2']
+        detected_keys = [k for k in field_keys_order if k in self.field_entities]
         for entity in detected_keys:
-            data = self.ner_entities[entity]
+            data = self.field_entities[entity]
             bbox = data["bbox"]
             entity_value = data["text"]
             report.append(f" {entity.ljust(17)} : {entity_value}")
@@ -2259,10 +2495,16 @@ class DocumentForgeryDetector:
 
 
 def ensure_output_folder():
-    """Creates the output folder if it doesn't exist."""
-    folder = "final_results/PNG_results"
-    os.makedirs(folder, exist_ok=True)
-    return folder
+    folders = [
+        "final_results/PNG_results",
+        "final_results/results/OCR_JSON_results",
+        "final_results/results/NER_JSON_results",
+    ]
+
+    for folder in folders:
+        os.makedirs(folder, exist_ok=True)
+
+    return folders[0]
 
 def default_png_output_path(image_path):
     """Build default PNG output path for a processed document."""

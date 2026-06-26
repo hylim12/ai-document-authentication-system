@@ -56,9 +56,35 @@ def process_dataset(folder_path, dataset_name):
 
             features = detector.forgery_features.copy()
 
+            # Field features
+            features["Field_Count"] = len(getattr(detector, "field_entities", {}))
+
+            # Country code from filename
+            raw_code = extract_country_code(file)
+
+            if raw_code != "SVK":
+                features["Has_POB"] = int(
+                    "PLACE OF BIRTH" in getattr(detector, "field_entities", {})
+                )
+            else:
+                features["Has_POB"] = 0
+
+            # Anomaly features
+            features["Num_Anomalies"] = len(getattr(detector, "anomalies", []))
+            features["Num_Background_Anomalies"] = len(getattr(detector, "background_anomalies", []))
+            features["Num_OCR_Box_Anomalies"] = len(getattr(detector, "ocr_box_anomalies", []))
+
+            # AML + CV METRICS
+
+            # OCR Quality (Text Extraction Reliability)
+            features["OCR_Quality"] = features.get("OCR_Confidence_Mean", 0)
+
+            # Field Completeness (Field Extraction Completeness Rate)
+            features["Field_Completeness"] = features.get("Field_Completeness_Ratio", 0)
+
             # Add metadata
             features["Image_Name"] = file
-            features["Country_Code"] = extract_country_code(file)
+            features["Country_Code"] = raw_code
             features["Label"] = extract_label_from_filename(file)
 
             dataset.append(features)
